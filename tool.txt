@@ -1,0 +1,9 @@
+fastapi
+pydantic
+uvicorn
+oracledb
+docker
+paramiko
+python-dotenv
+sentence-transformers
+pymongo
