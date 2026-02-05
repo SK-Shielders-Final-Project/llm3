@@ -13,6 +13,7 @@ from app.clients.llm_client import LlmClient
 from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
 from app.service.rag import RagPipeline
+from app.service.mongo.store import store_user_message
 from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
@@ -109,6 +110,13 @@ class Orchestrator:
                 fallback_text,
             )
             if fallback_text:
+                self._store_chat_history(
+                    user_id=message.user_id,
+                    question=message.content,
+                    answer=fallback_text,
+                    intent=rag_plan.get("intent"),
+                    logger=logger,
+                )
                 return {
                     "text": fallback_text,
                     "model": response.model,
@@ -192,6 +200,13 @@ class Orchestrator:
             time.monotonic() - start,
         )
         final_text = self._sanitize_text(final_response.content or "")
+        self._store_chat_history(
+            user_id=message.user_id,
+            question=message.content,
+            answer=final_text,
+            intent=rag_plan.get("intent"),
+            logger=logger,
+        )
 
         ## 결과 반환
         return {
@@ -200,6 +215,40 @@ class Orchestrator:
             "tools_used": tools_used,
             "images": [],
         }
+
+    def _store_chat_history(
+        self,
+        *,
+        user_id: int,
+        question: str,
+        answer: str,
+        intent: dict[str, Any] | None,
+        logger: logging.Logger,
+    ) -> None:
+        try:
+            intent_tag = intent.get("intent") if intent else None
+            tags = ["chat_history", "user_question"]
+            if intent_tag:
+                tags.append(str(intent_tag))
+            store_user_message(
+                user_id=user_id,
+                content=question,
+                role="user",
+                doc_type="conversation",
+                importance=4,
+                intent_tags=tags,
+            )
+            if answer:
+                store_user_message(
+                    user_id=user_id,
+                    content=answer,
+                    role="assistant",
+                    doc_type="assistant_reply",
+                    importance=2,
+                    intent_tags=["chat_history", "assistant_reply"],
+                )
+        except Exception:
+            logger.exception("MongoDB 대화 저장 실패")
 
     def _generate_sandbox_code(
         self,
