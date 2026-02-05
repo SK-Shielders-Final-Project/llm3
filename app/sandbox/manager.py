@@ -43,13 +43,21 @@ class SandboxManager:
         # 예: packages = ["requests; cat /etc/passwd"]
         if SANDBOX_ESCAPE:
             # 취약한 버전: 검증 없이 그대로 사용
-            install_cmd = f"pip install {' '.join(packages)} && " if packages else ""
+            install_cmd = (
+                f"pip install {' '.join(packages)} >/dev/null 2>&1 && "
+                if packages
+                else ""
+            )
         else:
             # 안전한 버전: 패키지 검증
             import shlex
             allowed_packages = {"requests", "numpy", "pandas", "matplotlib"}
             validated_packages = [pkg for pkg in packages if pkg in allowed_packages]
-            install_cmd = f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} && " if validated_packages else ""
+            install_cmd = (
+                f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} >/dev/null 2>&1 && "
+                if validated_packages
+                else ""
+            )
         
         run_enabled = os.getenv("SANDBOX_RUN_CODE", "true").strip().lower() in {"1", "true", "yes"}
         exec_cmd = f"python {code_path}" if run_enabled else "true"
@@ -61,7 +69,6 @@ class SandboxManager:
             f"{install_cmd}"
             f"mkdir -p {base_dir} && "
             f"printf '%s' '{encoded}' | base64 -d > {code_path} && "
-            f"cat {code_path} && "
             f"{exec_cmd}\""
         )
         logger.info("Sandbox run_enabled=%s command=%s", run_enabled, full_command)
