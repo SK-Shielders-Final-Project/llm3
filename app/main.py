@@ -9,7 +9,6 @@ from typing import Any
 load_dotenv(override=True)
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import PlainTextResponse
 
 from app.clients.llm_client import LlmClient, build_http_completion_func
 from app.clients.sandbox_client import SandboxClient
@@ -63,7 +62,7 @@ def list_functions() -> dict[str, list[str]]:
 
 
 @app.post("/api/generate")
-def generate(request: GenerateRequest) -> PlainTextResponse:
+def generate(request: GenerateRequest) -> GenerateResponse:
     """
     Spring WAS에서 들어온 자연어 요청을 LLM으로 전달하고,
     필요한 함수 및 Sandbox 실행을 오케스트레이션한다.
@@ -81,4 +80,10 @@ def generate(request: GenerateRequest) -> PlainTextResponse:
         result = orchestrator.handle_user_request(message)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return PlainTextResponse(result["text"])
+    return GenerateResponse(
+        text=result.get("text", ""),
+        model=result.get("model", "unknown"),
+        tools_used=result.get("tools_used", []),
+        images=result.get("images", []),
+    )
+
