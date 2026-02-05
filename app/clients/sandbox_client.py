@@ -11,6 +11,12 @@ import uuid
 from docker.errors import DockerException
 import paramiko
 
+
+# ⚠️ 워게임 모드: True로 설정하면 의도적인 취약점이 활성화됩니다
+# 프로덕션 환경에서는 반드시 False로 설정하세요!
+SANDBOX_ESCAPE = True
+
+
 class SandboxClient:
     """
     FastAPI 서버에서 원격 Sandbox 서버로 코드를 전달한다.
@@ -93,8 +99,23 @@ class SandboxClient:
             ) from exc
         base_dir, code_path = self._build_paths(user_id, run_id)
         encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
-        install_cmd = f"pip install {' '.join(required_packages)} && " if required_packages else ""
-        inner_prefix = f"docker exec {self.inner_exec_container} " if self.inner_exec_container else ""
+        
+        if SANDBOX_ESCAPE:
+            # VULNERABILITY 8: Command Injection via packages (EASY)
+            # required_packages에 대한 검증이 전혀 없음
+            install_cmd = f"pip install {' '.join(required_packages)} && " if required_packages else ""
+            
+            # VULNERABILITY 9: Docker exec injection (HARD)
+            # inner_exec_container 값을 조작하여 명령어 주입 가능
+            inner_prefix = f"docker exec {self.inner_exec_container} " if self.inner_exec_container else ""
+        else:
+            # 안전한 버전: 패키지 검증
+            import shlex
+            allowed_packages = {"requests", "numpy", "pandas", "matplotlib"}
+            validated_packages = [pkg for pkg in required_packages if pkg in allowed_packages]
+            install_cmd = f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} && " if validated_packages else ""
+            inner_prefix = ""
+        
         command = (
             "bash -lc \""
             f"{inner_prefix}{install_cmd}"
@@ -126,8 +147,23 @@ class SandboxClient:
 
         base_dir, code_path = self._build_paths(user_id, run_id)
         encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
-        install_cmd = f"pip install {' '.join(required_packages)} && " if required_packages else ""
-        inner_prefix = f"docker exec {self.inner_exec_container} " if self.inner_exec_container else ""
+        
+        if SANDBOX_ESCAPE:
+            # VULNERABILITY 10: Command Injection via SSH (MEDIUM)
+            # required_packages 검증 없이 SSH 명령어에 직접 삽입
+            install_cmd = f"pip install {' '.join(required_packages)} && " if required_packages else ""
+            
+            # VULNERABILITY 11: Container name injection (HARD)
+            # exec_container, inner_exec_container 값 검증 없음
+            inner_prefix = f"docker exec {self.inner_exec_container} " if self.inner_exec_container else ""
+        else:
+            # 안전한 버전
+            import shlex
+            allowed_packages = {"requests", "numpy", "pandas", "matplotlib"}
+            validated_packages = [pkg for pkg in required_packages if pkg in allowed_packages]
+            install_cmd = f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} && " if validated_packages else ""
+            inner_prefix = ""
+        
         command = (
             f"docker exec {self.exec_container} "
             f"{inner_prefix}bash -lc \""
@@ -139,7 +175,13 @@ class SandboxClient:
         )
 
         ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if SANDBOX_ESCAPE:
+            # VULNERABILITY 12: Auto-accept unknown host keys (MEDIUM)
+            # MITM 공격에 취약
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            # 안전한 버전: known_hosts 파일 사용
+            ssh.load_system_host_keys()
         key = paramiko.RSAKey.from_private_key_file(self.ssh_key_path)
         ssh.connect(
             hostname=self.ssh_host,
@@ -167,7 +209,37 @@ class SandboxClient:
             ssh.close()
 
     def _build_paths(self, user_id: int | None, run_id: str | None) -> tuple[str, str]:
-        suffix = str(user_id) if user_id is not None else "shared"
-        base_dir = f"/code/{suffix}"
-        run_suffix = run_id or uuid.uuid4().hex
-        return base_dir, f"{base_dir}/user_code_{run_suffix}.py"
+        if SANDBOX_ESCAPE:
+            # VULNERABILITY 13-15: Path manipulation vulnerabilities
+            # user_id를 str()로만 변환하고 검증하지 않음
+            suffix = str(user_id) if user_id is not None else "shared"
+            base_dir = f"/code/{suffix}"
+            
+            # run_id에 "../", "./", "/" 등의 경로 조작 문자가 있어도 필터링 안 함
+            # 예: run_id = "../../root/.ssh/authorized_keys"
+            run_suffix = run_id or uuid.uuid4().hex
+            
+            code_path = f"{base_dir}/user_code_{run_suffix}.py"
+        else:
+            # 안전한 버전: 경로 검증
+            import re
+            if user_id is not None and isinstance(user_id, int) and user_id >= 0:
+                suffix = str(user_id)
+            else:
+                suffix = "shared"
+            base_dir = f"/code/{suffix}"
+            
+            if run_id:
+                # 영문, 숫자, 하이픈, 언더스코어만 허용
+                if not re.match(r'^[a-zA-Z0-9_-]+$', run_id):
+                    run_id = None
+                run_suffix = run_id or uuid.uuid4().hex
+            else:
+                run_suffix = uuid.uuid4().hex
+            
+            code_path = os.path.normpath(f"{base_dir}/user_code_{run_suffix}.py")
+            # 경로가 base_dir 내부인지 확인
+            if not code_path.startswith(base_dir):
+                code_path = f"{base_dir}/user_code_{uuid.uuid4().hex}.py"
+        
+        return base_dir, code_path
