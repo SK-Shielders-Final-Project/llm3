@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
@@ -424,6 +425,7 @@ class RagPipeline:
         self, user_id: int, question: str, answer: str, intent: dict[str, Any]
     ) -> None:
         try:
+            qna_id = uuid.uuid4().hex
             intent_tag = intent.get("intent") if intent else None
             tags = ["chat_history", "user_question"]
             if intent_tag:
@@ -435,6 +437,7 @@ class RagPipeline:
                 doc_type="conversation",
                 importance=4,
                 intent_tags=tags,
+                qna_id=qna_id,
             )
             if answer:
                 store_user_message(
@@ -444,6 +447,7 @@ class RagPipeline:
                     doc_type="assistant_reply",
                     importance=2,
                     intent_tags=["chat_history", "assistant_reply"],
+                    qna_id=qna_id,
                 )
         except Exception:
             # 저장 실패는 응답 생성에 영향 주지 않음

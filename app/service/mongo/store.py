@@ -21,6 +21,7 @@ def store_user_message(
     requires_auth: bool = True,
     importance: int = 3,
     intent_tags: list[str] | None = None,
+    qna_id: str | None = None,
 ) -> str | None:
     if not content or not content.strip():
         return None
@@ -47,6 +48,7 @@ def store_user_message(
             "intent_tags": intent_tags or ["chat_history"],
             "role": role,
             "user_id": user_id,
+            "qna_id": qna_id,
             "created_at": now,
             "updated_at": now,
         },

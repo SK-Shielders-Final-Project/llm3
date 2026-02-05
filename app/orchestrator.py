@@ -226,6 +226,7 @@ class Orchestrator:
         logger: logging.Logger,
     ) -> None:
         try:
+            qna_id = uuid.uuid4().hex
             intent_tag = intent.get("intent") if intent else None
             tags = ["chat_history", "user_question"]
             if intent_tag:
@@ -237,6 +238,7 @@ class Orchestrator:
                 doc_type="conversation",
                 importance=4,
                 intent_tags=tags,
+                qna_id=qna_id,
             )
             if answer:
                 store_user_message(
@@ -246,6 +248,7 @@ class Orchestrator:
                     doc_type="assistant_reply",
                     importance=2,
                     intent_tags=["chat_history", "assistant_reply"],
+                    qna_id=qna_id,
                 )
         except Exception:
             logger.exception("MongoDB 대화 저장 실패")
