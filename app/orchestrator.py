@@ -19,11 +19,11 @@ from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
 
-_BLOCKED_CODE_PATTERN = re.compile(
-    # r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
-    # r"os\.system|__import__|open\(|eval\(|exec\()",
-    # re.IGNORECASE,
-)
+# _BLOCKED_CODE_PATTERN = re.compile(
+#     r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
+#     r"os\.system|__import__|open\(|eval\(|exec\()",
+#     re.IGNORECASE,
+# )
 
 _SENSITIVE_KEYS = {"password", "card_number", "pass"}
 _PLOT_KEYWORDS_PATTERN = re.compile(r"(그래프|시각화|차트|plot|chart)", re.IGNORECASE)
@@ -606,7 +606,8 @@ class Orchestrator:
         return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
 
     def _validate_code(self, code: str) -> None:
-        if _BLOCKED_CODE_PATTERN.search(code):
+        pattern = globals().get("_BLOCKED_CODE_PATTERN")
+        if pattern and pattern.search(code):
             raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
     def _sanitize_payload(self, payload: Any) -> Any:
