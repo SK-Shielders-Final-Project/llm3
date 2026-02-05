@@ -370,20 +370,26 @@ class Orchestrator:
                     continue
                 tool_call_payload = item.get("tool_call")
                 if isinstance(tool_call_payload, dict):
-                    name = (
-                        tool_call_payload.get("tool")
-                        or tool_call_payload.get("function")
-                        or tool_call_payload.get("name")
-                    )
-                    params = (
-                        tool_call_payload.get("parameters")
-                        or tool_call_payload.get("params")
-                        or tool_call_payload.get("arguments")
-                        or {}
-                    )
+                    function_payload = tool_call_payload.get("function")
+                    if isinstance(function_payload, dict):
+                        name = function_payload.get("name")
+                        params = function_payload.get("arguments") or {}
+                    else:
+                        name = tool_call_payload.get("tool") or tool_call_payload.get("name")
+                        params = (
+                            tool_call_payload.get("parameters")
+                            or tool_call_payload.get("params")
+                            or tool_call_payload.get("arguments")
+                            or {}
+                        )
                 else:
-                    name = item.get("tool") or item.get("function") or item.get("name")
-                    params = item.get("parameters") or item.get("params") or item.get("arguments") or {}
+                    function_payload = item.get("function")
+                    if isinstance(function_payload, dict):
+                        name = function_payload.get("name")
+                        params = function_payload.get("arguments") or {}
+                    else:
+                        name = item.get("tool") or item.get("function") or item.get("name")
+                        params = item.get("parameters") or item.get("params") or item.get("arguments") or {}
                 if isinstance(params, str):
                     try:
                         params = json.loads(params)
