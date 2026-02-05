@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from app.config.mongoDB import get_mongo_collection
 from app.service.mongo.embedding import embed_text
+
+logger = logging.getLogger(__name__)
 
 
 def store_user_message(
@@ -23,7 +26,11 @@ def store_user_message(
         return None
 
     collection = get_mongo_collection()
-    embedding = embed_text(content)
+    try:
+        embedding = embed_text(content)
+    except Exception as exc:  # pragma: no cover - 런타임 환경에서 확인
+        logger.exception("MongoDB 임베딩 생성 실패, 빈 임베딩으로 저장합니다.")
+        embedding = []
     now = datetime.now(tz=timezone.utc)
     payload: dict[str, Any] = {
         "content": content,
@@ -44,5 +51,9 @@ def store_user_message(
             "updated_at": now,
         },
     }
-    result = collection.insert_one(payload)
+    try:
+        result = collection.insert_one(payload)
+    except Exception:  # pragma: no cover - 런타임 환경에서 확인
+        logger.exception("MongoDB 저장 실패")
+        raise
     return str(result.inserted_id) if result.inserted_id else None

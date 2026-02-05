@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
@@ -21,6 +22,8 @@ from app.service.registry import (
     get_total_usage,
     get_user_profile,
 )
+
+logger = logging.getLogger(__name__)
 
 IntentType = Literal["personal_data", "general_knowledge", "realtime_location", "admin_function"]
 DataSourceType = Literal["vector_only", "mysql_only", "hybrid"]
@@ -444,6 +447,7 @@ class RagPipeline:
                 )
         except Exception:
             # 저장 실패는 응답 생성에 영향 주지 않음
+            logger.exception("MongoDB 대화 저장 실패")
             return
 
     def _select_allowed_tools(
