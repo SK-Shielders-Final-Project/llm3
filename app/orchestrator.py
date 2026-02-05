@@ -81,26 +81,33 @@ class Orchestrator:
             "context": rag_context,
             "user_message": message.content,
         }
-        code = self._generate_sandbox_code(task=task, inputs=inputs, results=[])
-        code = self._build_sandbox_code(code=code, task=task, inputs=inputs, results=[])
-        logger.info(
-            "============== [LLM GENERATED CODE] ==============\n%s\n==================================================",
-            code,
-        )
-        self._validate_code(code)
-        required_packages: list[str] = []
-        inferred_packages = self._infer_packages_from_code(code)
-        if inferred_packages:
-            required_packages = self._ensure_packages(required_packages, inferred_packages)
-        if self._needs_plot_packages(message.content):
-            required_packages = self._ensure_packages(required_packages, ["matplotlib"])
-        sandbox_result = self.sandbox_client.run_code(
-            code=code,
-            required_packages=required_packages,
-            user_id=message.user_id,
-            run_id=uuid.uuid4().hex,
-        )
-        text = sandbox_result.get("stdout") or sandbox_result.get("error") or ""
+        try:
+            code = self._generate_sandbox_code(task=task, inputs=inputs, results=[])
+            code = self._build_sandbox_code(code=code, task=task, inputs=inputs, results=[])
+            logger.info(
+                "============== [LLM GENERATED CODE] ==============\n%s\n==================================================",
+                code,
+            )
+            self._validate_code(code)
+            required_packages: list[str] = []
+            inferred_packages = self._infer_packages_from_code(code)
+            if inferred_packages:
+                required_packages = self._ensure_packages(required_packages, inferred_packages)
+            if self._needs_plot_packages(message.content):
+                required_packages = self._ensure_packages(required_packages, ["matplotlib"])
+            sandbox_result = self.sandbox_client.run_code(
+                code=code,
+                required_packages=required_packages,
+                user_id=message.user_id,
+                run_id=uuid.uuid4().hex,
+            )
+            stderr = sandbox_result.get("stderr")
+            if stderr:
+                logger.error("Sandbox stderr: %s", stderr)
+            text = sandbox_result.get("stdout") or stderr or sandbox_result.get("error") or ""
+        except Exception as exc:
+            logger.exception("Sandbox 실행 실패: %s", exc)
+            text = f"Sandbox 실행 실패: {exc}"
         self._store_chat_history(
             user_id=message.user_id,
             question=message.content,
