@@ -11,7 +11,7 @@ class LlmMessage(BaseModel):
         examples=["user"],
         description="메시지 역할",
     )
-    user_id: int = Field(..., examples=[1], description="대화 소유 사용자 ID")
+    user_id: int | None = Field(default=0, examples=[1], description="대화 소유 사용자 ID (없으면 0)")
     admin_level: int | None = Field(
         default=None,
         examples=[0, 1, 2],
