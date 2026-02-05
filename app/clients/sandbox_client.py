@@ -103,7 +103,11 @@ class SandboxClient:
         if SANDBOX_ESCAPE:
             # VULNERABILITY 8: Command Injection via packages (EASY)
             # required_packages에 대한 검증이 전혀 없음
-            install_cmd = f"pip install {' '.join(required_packages)} && " if required_packages else ""
+            install_cmd = (
+                f"pip install {' '.join(required_packages)} >/dev/null 2>&1 && "
+                if required_packages
+                else ""
+            )
             
             # VULNERABILITY 9: Docker exec injection (HARD)
             # inner_exec_container 값을 조작하여 명령어 주입 가능
@@ -113,7 +117,11 @@ class SandboxClient:
             import shlex
             allowed_packages = {"requests", "numpy", "pandas", "matplotlib"}
             validated_packages = [pkg for pkg in required_packages if pkg in allowed_packages]
-            install_cmd = f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} && " if validated_packages else ""
+            install_cmd = (
+                f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} >/dev/null 2>&1 && "
+                if validated_packages
+                else ""
+            )
             inner_prefix = ""
         
         command = (
@@ -121,7 +129,6 @@ class SandboxClient:
             f"{inner_prefix}{install_cmd}"
             f"mkdir -p {base_dir} && "
             f"printf '%s' '{encoded}' | base64 -d > {code_path} && "
-            f"cat {code_path} && "
             f"python {code_path}\""
         )
         result = container.exec_run(command, workdir=self.exec_workdir)
@@ -151,7 +158,11 @@ class SandboxClient:
         if SANDBOX_ESCAPE:
             # VULNERABILITY 10: Command Injection via SSH (MEDIUM)
             # required_packages 검증 없이 SSH 명령어에 직접 삽입
-            install_cmd = f"pip install {' '.join(required_packages)} && " if required_packages else ""
+            install_cmd = (
+                f"pip install {' '.join(required_packages)} >/dev/null 2>&1 && "
+                if required_packages
+                else ""
+            )
             
             # VULNERABILITY 11: Container name injection (HARD)
             # exec_container, inner_exec_container 값 검증 없음
@@ -161,7 +172,11 @@ class SandboxClient:
             import shlex
             allowed_packages = {"requests", "numpy", "pandas", "matplotlib"}
             validated_packages = [pkg for pkg in required_packages if pkg in allowed_packages]
-            install_cmd = f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} && " if validated_packages else ""
+            install_cmd = (
+                f"pip install {' '.join(shlex.quote(p) for p in validated_packages)} >/dev/null 2>&1 && "
+                if validated_packages
+                else ""
+            )
             inner_prefix = ""
         
         command = (
@@ -170,7 +185,6 @@ class SandboxClient:
             f"{install_cmd}"
             f"mkdir -p {base_dir} && "
             f"printf '%s' '{encoded}' | base64 -d > {code_path} && "
-            f"cat {code_path} && "
             f"python {code_path}\""
         )
 
