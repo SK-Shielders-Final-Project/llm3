@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -590,14 +591,15 @@ class Orchestrator:
         results: list[dict[str, Any]],
     ) -> str:
         payload = inputs if inputs is not None else {"results": results, "task": task}
-        encoded = json.dumps(payload, ensure_ascii=False)
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         prelude = (
+            "import base64\n"
             "import json\n"
             "import os\n"
             "import matplotlib\n"
             "matplotlib.use('Agg')\n"
             "import matplotlib.pyplot as plt\n"
-            f"inputs = json.loads('''{encoded}''')\n"
+            f"inputs = json.loads(base64.b64decode('{base64.b64encode(encoded).decode('ascii')}').decode('utf-8'))\n"
         )
         if code:
             return f"{prelude}\n{code}"
