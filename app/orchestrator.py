@@ -71,60 +71,49 @@ class Orchestrator:
                 plan=rag_plan,
                 admin_level=getattr(message, "admin_level", None),
             )
-            return {
-                "text": rag_result.get("answer", ""),
-                "model": "rag_pipeline",
-                "tools_used": [],
-                "images": [],
-            }
+            rag_context = rag_result.get("answer", "")
+        else:
+            rag_context = rag_plan.get("context", "")
 
-        ## 시스템 프롬프트 주입
-        system_prompt = build_system_context(message)
-        ## 해당 도구 사용하는 스키마
-        tools = self._filter_tools_by_allowlist(
-            build_tool_schema(), rag_plan.get("tool_allowlist", [])
-        )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{message.content}\n\n{rag_plan.get('context','')}"},
-        ]
-
-        ## llm 실행 1차 응답
-        response = self.llm_client.create_completion(messages=messages, tools=tools)
-        ## LLM이 Tool을 요청하거나 Plan JSON형식으로 전달
-
+        ## LLM이 생성한 코드를 무조건 Sandbox에서 실행
+        task = message.content
+        inputs = {
+            "context": rag_context,
+            "user_message": message.content,
+        }
+        code = self._generate_sandbox_code(task=task, inputs=inputs, results=[])
+        code = self._build_sandbox_code(code=code, task=task, inputs=inputs, results=[])
         logger.info(
-            "LLM 1차 응답 elapsed=%.2fs tool_calls=%s",
-            time.monotonic() - start,
-            len(response.tool_calls),
+            "============== [LLM GENERATED CODE] ==============\n%s\n==================================================",
+            code,
         )
-
-        ## 다른 도구들 실행 여부 확인
-        tool_calls = response.tool_calls or self._extract_tool_calls(response.content or "")
-
-        if not tool_calls:
-            fallback_text = self._sanitize_text(response.content or "")
-            logger.warning(
-                "LLM tool_calls 누락: fallback_response_used=%s content=%s",
-                bool(fallback_text),
-                fallback_text,
-            )
-            if fallback_text:
-                self._store_chat_history(
-                    user_id=message.user_id,
-                    question=message.content,
-                    answer=fallback_text,
-                    intent=rag_plan.get("intent"),
-                    logger=logger,
-                )
-                return {
-                    "text": fallback_text,
-                    "model": response.model,
-                    "tools_used": [],
-                    "images": [],
-                }
-            raise ValueError("LLM이 tool_calls 또는 plan JSON을 반환하지 않았습니다.")
+        self._validate_code(code)
+        required_packages: list[str] = []
+        inferred_packages = self._infer_packages_from_code(code)
+        if inferred_packages:
+            required_packages = self._ensure_packages(required_packages, inferred_packages)
+        if self._needs_plot_packages(message.content):
+            required_packages = self._ensure_packages(required_packages, ["matplotlib"])
+        sandbox_result = self.sandbox_client.run_code(
+            code=code,
+            required_packages=required_packages,
+            user_id=message.user_id,
+            run_id=uuid.uuid4().hex,
+        )
+        text = sandbox_result.get("stdout") or sandbox_result.get("error") or ""
+        self._store_chat_history(
+            user_id=message.user_id,
+            question=message.content,
+            answer=text,
+            intent=rag_plan.get("intent"),
+            logger=logger,
+        )
+        return {
+            "text": text,
+            "model": "sandbox",
+            "tools_used": ["execute_in_sandbox"],
+            "images": [],
+        }
 
 
         ## 결과, 사용된 도구를 배열로 담음
