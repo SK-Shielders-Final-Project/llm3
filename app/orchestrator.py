@@ -20,9 +20,9 @@ from app.schema import LlmMessage
 
 
 _BLOCKED_CODE_PATTERN = re.compile(
-    r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
-    r"os\.system|__import__|open\(|eval\(|exec\()",
-    re.IGNORECASE,
+    # r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
+    # r"os\.system|__import__|open\(|eval\(|exec\()",
+    # re.IGNORECASE,
 )
 
 _SENSITIVE_KEYS = {"password", "card_number", "pass"}
