@@ -65,9 +65,10 @@ class Orchestrator:
         )
         decision = rag_plan.get("decision") or {}
         if decision.get("data_source") == "vector_only":
-            rag_result = self.rag_pipeline.process_question(
+            rag_result = self.rag_pipeline.answer_from_plan(
                 question=message.content,
                 user_id=message.user_id,
+                plan=rag_plan,
                 admin_level=getattr(message, "admin_level", None),
             )
             return {

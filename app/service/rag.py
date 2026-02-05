@@ -103,6 +103,42 @@ class RagPipeline:
             "mysql_data": mysql_data,
         }
 
+    def answer_from_plan(
+        self,
+        *,
+        question: str,
+        user_id: int,
+        plan: dict[str, Any],
+        admin_level: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        plan_tool_selection에서 생성된 결과를 재사용해 답변을 만든다.
+        vector_only 경로에서 중복 검색/분류를 줄이기 위해 사용한다.
+        """
+        intent = plan.get("intent") or {}
+        docs = plan.get("vector_docs") or []
+        decision = plan.get("decision") or {}
+        resolved_admin = self._resolve_admin_level(user_id, admin_level)
+
+        mysql_data: dict[str, Any] | None = None
+        if decision.get("data_source") in {"mysql_only", "hybrid"}:
+            mysql_data = self._fetch_mysql_data(
+                intent=intent,
+                user_id=user_id,
+                admin_level=resolved_admin,
+                decision=decision,
+            )
+
+        answer = self._generate_answer(question, intent, docs, mysql_data)
+        self._store_conversation(user_id=user_id, question=question, answer=answer, intent=intent)
+        return {
+            "answer": answer,
+            "intent": intent,
+            "decision": decision,
+            "vector_docs": docs,
+            "mysql_data": mysql_data,
+        }
+
     def plan_tool_selection(
         self,
         question: str,
