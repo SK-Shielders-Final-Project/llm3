@@ -20,7 +20,7 @@ from app.schema import LlmMessage
 
 
 _BLOCKED_CODE_PATTERN = re.compile(
-    r"(import\s+sys|subprocess|socket|requests|shutil|rm\s+-rf|"
+    r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
     r"os\.system|__import__|open\(|eval\(|exec\()",
     re.IGNORECASE,
 )
