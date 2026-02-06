@@ -63,19 +63,6 @@ class Orchestrator:
             admin_level=getattr(message, "admin_level", None),
         )
         decision = rag_plan.get("decision") or {}
-        if decision.get("data_source") == "vector_only":
-            rag_result = self.rag_pipeline.process_question(
-                question=message.content,
-                user_id=message.user_id,
-                admin_level=getattr(message, "admin_level", None),
-            )
-            return {
-                "text": rag_result.get("answer", ""),
-                "model": "rag_pipeline",
-                "tools_used": [],
-                "images": [],
-            }
-
         ## 시스템 프롬프트 주입
         system_prompt = build_system_context(message)
         ## 해당 도구 사용하는 스키마

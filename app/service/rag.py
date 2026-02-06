@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
 from app.clients.llm_client import LlmClient
-from app.config.llm_service import MOBILITY_CAPABILITIES_SUMMARY
 from app.service.mongo.search import search_knowledge
 from app.service.mongo.store import store_user_message
 from app.service.mongo.manual_search import (
@@ -77,27 +76,6 @@ class RagPipeline:
         admin_level: int | None = None,
         top_k: int = 5,
     ) -> dict[str, Any]:
-        if self._is_capability_query(question):
-            answer = self._build_capability_answer()
-            intent = {
-                "intent": "general_knowledge",
-                "data_source": "hybrid",
-                "mysql_tables": [],
-                "confidence": 1.0,
-                "reasoning": "capability_query",
-            }
-            decision = {
-                "data_source": "hybrid",
-                "confidence": 1.0,
-                "reasoning": "capability_query",
-            }
-            return {
-                "answer": answer,
-                "intent": intent,
-                "decision": decision,
-                "vector_docs": [],
-                "mysql_data": None,
-            }
         admin_level = self._resolve_admin_level(user_id, admin_level)
         intent = self._classify_intent(question)
         raw_docs = search_knowledge(
@@ -128,27 +106,6 @@ class RagPipeline:
         admin_level: int | None = None,
         top_k: int = 5,
     ) -> dict[str, Any]:
-        if self._is_capability_query(question):
-            intent = {
-                "intent": "general_knowledge",
-                "data_source": "hybrid",
-                "mysql_tables": [],
-                "confidence": 1.0,
-                "reasoning": "capability_query",
-            }
-            decision = {
-                "data_source": "hybrid",
-                "confidence": 1.0,
-                "reasoning": "capability_query",
-            }
-            return {
-                "intent": intent,
-                "decision": decision,
-                "vector_docs": [],
-                "manual_docs": [],
-                "tool_allowlist": [],
-                "context": "사용자 기능 안내 요청: 도구 호출 없이 모빌리티 기능 요약.",
-            }
         admin_level = self._resolve_admin_level(user_id, admin_level)
         intent = self._classify_intent(question)
         raw_docs = search_knowledge(
@@ -534,27 +491,6 @@ class RagPipeline:
                 seen.add(name)
                 deduped.append(name)
         return deduped
-
-    def _is_capability_query(self, question: str) -> bool:
-        normalized = " ".join((question or "").lower().split())
-        keywords = [
-            "할 수 있는 기능",
-            "할수있는 기능",
-            "가능한 기능",
-            "기능 알려",
-            "기능들",
-            "뭐 할 수",
-            "what can you do",
-            "capabilities",
-        ]
-        return any(kw in normalized for kw in keywords)
-
-    def _build_capability_answer(self) -> str:
-        return (
-            "제가 안내할 수 있는 공유 모빌리티 기능은 다음과 같습니다.\n"
-            f"{MOBILITY_CAPABILITIES_SUMMARY}\n"
-            "원하는 항목을 말씀해 주세요."
-        )
 
     def _search_manual_if_relevant(
         self,
