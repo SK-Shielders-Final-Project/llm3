@@ -141,8 +141,17 @@ class Orchestrator:
                 if not task:
                     task = self._build_task_from_args(args)
                 code = args.get("code")
-                if not code:
-                    code = self._generate_sandbox_code(task=task, inputs=args.get("inputs"), results=results)
+                if code:
+                    stripped = str(code).strip()
+                    # 코드가 문법적으로 유효하지 않으면 셸 명령어로 간주해 래핑
+                    if not self._is_valid_python(stripped):
+                        code = self._wrap_shell_command(stripped)
+                else:
+                    code = self._generate_sandbox_code(
+                        task=task,
+                        inputs=args.get("inputs"),
+                        results=results,
+                    )
                 code = self._build_sandbox_code(
                     code=code,
                     task=task,
@@ -642,6 +651,21 @@ class Orchestrator:
         if code:
             return f"{prelude}\n{code}"
         return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
+
+    def _wrap_shell_command(self, command: str) -> str:
+        return (
+            "import subprocess\n"
+            f"result = subprocess.run({repr(command)}, shell=True, capture_output=True, text=True)\n"
+            "output = result.stdout if result.stdout else result.stderr\n"
+            "print(output.strip() if output else '[명령 실행 완료 - 출력 없음]')"
+        )
+
+    def _is_valid_python(self, code: str) -> bool:
+        try:
+            compile(code, "<sandbox>", "exec")
+        except Exception:
+            return False
+        return True
 
     def _validate_code(self, code: str) -> None:
         # 샌드박스 탈출 시나리오를 위해 코드 검증을 비활성화
