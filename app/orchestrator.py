@@ -76,67 +76,38 @@ class Orchestrator:
         else:
             rag_context = rag_plan.get("context", "")
 
-        ## LLM이 생성한 코드를 무조건 Sandbox에서 실행
-        task = message.content
-        inputs = {
-            "context": rag_context,
-            "user_message": message.content,
-        }
-        try:
-            code = self._generate_sandbox_code(task=task, inputs=inputs, results=[])
-            code = self._build_sandbox_code(code=code, task=task, inputs=inputs, results=[])
-            logger.info(
-                "============== [LLM GENERATED CODE] ==============\n%s\n==================================================",
-                code,
-            )
-            self._validate_code(code)
-            required_packages: list[str] = []
-            inferred_packages = self._infer_packages_from_code(code)
-            if inferred_packages:
-                required_packages = self._ensure_packages(required_packages, inferred_packages)
-            if self._needs_plot_packages(message.content):
-                required_packages = self._ensure_packages(required_packages, ["matplotlib"])
-            sandbox_result = self.sandbox_client.run_code(
-                code=code,
-                required_packages=required_packages,
-                user_id=message.user_id,
-                run_id=uuid.uuid4().hex,
-            )
-            stderr = sandbox_result.get("stderr", "")
-            stdout = sandbox_result.get("stdout", "")
-            error = sandbox_result.get("error", "")
-            
-            # 샌드박스 실행 결과를 반드시 사용자에게 전달
-            if stdout:
-                text = f"[실행 결과]\n{stdout}"
-                if stderr:
-                    text += f"\n\n[경고/오류]\n{stderr}"
-            elif stderr:
-                text = f"[실행 오류]\n{stderr}"
-                logger.error("Sandbox stderr: %s", stderr)
-            elif error:
-                text = f"[실행 실패]\n{error}"
-            else:
-                text = "[실행 완료] 출력 없음"
-            
-            logger.info("Sandbox 실행 결과: %s", text)
-        except Exception as exc:
-            logger.exception("Sandbox 실행 실패: %s", exc)
-            text = f"Sandbox 실행 실패: {exc}"
-        self._store_chat_history(
-            user_id=message.user_id,
-            question=message.content,
-            answer=text,
-            intent=rag_plan.get("intent"),
-            logger=logger,
-        )
-        return {
-            "text": text,
-            "model": "sandbox",
-            "tools_used": ["execute_in_sandbox"],
-            "images": [],
-        }
+        ## 시스템 프롬프트와 도구 스키마 준비
+        system_prompt = build_system_context(message)
+        tools = build_tool_schema()
 
+        ## LLM 첫 호출: 도구 호출 계획
+        user_content = (
+            f"사용자 요청: {message.content}\n"
+            f"컨텍스트:\n{rag_context}"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        response = self.llm_client.create_completion(messages=messages, tools=tools)
+
+        ## 도구 호출이 없으면 바로 자연어 응답 반환
+        tool_calls = response.tool_calls or self._extract_tool_calls(response.content or "")
+        if not tool_calls:
+            final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=rag_plan.get("intent"),
+                logger=logger,
+            )
+            return {
+                "text": final_text,
+                "model": response.model,
+                "tools_used": [],
+                "images": [],
+            }
 
         ## 결과, 사용된 도구를 배열로 담음
         results: list[dict[str, Any]] = []
