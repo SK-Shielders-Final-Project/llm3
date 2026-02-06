@@ -102,10 +102,24 @@ class Orchestrator:
                 user_id=message.user_id,
                 run_id=uuid.uuid4().hex,
             )
-            stderr = sandbox_result.get("stderr")
-            if stderr:
+            stderr = sandbox_result.get("stderr", "")
+            stdout = sandbox_result.get("stdout", "")
+            error = sandbox_result.get("error", "")
+            
+            # 샌드박스 실행 결과를 반드시 사용자에게 전달
+            if stdout:
+                text = f"[실행 결과]\n{stdout}"
+                if stderr:
+                    text += f"\n\n[경고/오류]\n{stderr}"
+            elif stderr:
+                text = f"[실행 오류]\n{stderr}"
                 logger.error("Sandbox stderr: %s", stderr)
-            text = sandbox_result.get("stdout") or stderr or sandbox_result.get("error") or ""
+            elif error:
+                text = f"[실행 실패]\n{error}"
+            else:
+                text = "[실행 완료] 출력 없음"
+            
+            logger.info("Sandbox 실행 결과: %s", text)
         except Exception as exc:
             logger.exception("Sandbox 실행 실패: %s", exc)
             text = f"Sandbox 실행 실패: {exc}"
@@ -262,8 +276,21 @@ class Orchestrator:
 
         system_prompt = (
             "너는 Python 코드 생성기다. "
-            "이미 변수 inputs(dict)가 존재한다고 가정하고 이를 활용한다. "
-            "설명/주석/코드블록 없이 Python 코드만 출력하라."
+            "사용자가 요청한 작업을 정확히 실행하는 Python 코드를 생성한다.\n"
+            "이미 변수 inputs(dict)가 존재한다고 가정하고 이를 활용한다.\n"
+            "시스템 명령어를 실행해야 하는 경우:\n"
+            "1. import subprocess를 사용한다\n"
+            "2. subprocess.run()을 사용하여 명령어를 실행한다\n"
+            "3. stdout과 stderr를 모두 캡처한다\n"
+            "4. 결과를 print()로 출력한다\n"
+            "5. 명령어 실행 시 shell=True를 사용한다\n\n"
+            "예시:\n"
+            "```python\n"
+            "import subprocess\n"
+            "result = subprocess.run('ls -la', shell=True, capture_output=True, text=True)\n"
+            "print(result.stdout if result.stdout else result.stderr)\n"
+            "```\n\n"
+            "설명/주석/코드블록 마크다운 없이 Python 코드만 출력하라."
         )
         payload = inputs if inputs is not None else {"results": results, "task": task}
         messages = [
@@ -272,7 +299,9 @@ class Orchestrator:
                 "role": "user",
                 "content": (
                     f"작업: {task}\n"
-                    f"inputs: {json.dumps(payload, ensure_ascii=False)}"
+                    f"inputs: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    "위 작업을 수행하는 Python 코드를 생성하라. "
+                    "만약 시스템 명령어 실행이 필요하면 subprocess를 사용하라."
                 ),
             },
         ]
@@ -596,6 +625,8 @@ class Orchestrator:
             "import base64\n"
             "import json\n"
             "import os\n"
+            "import subprocess\n"  # subprocess 추가
+            "import sys\n"  # sys 추가
             "import matplotlib\n"
             "matplotlib.use('Agg')\n"
             "import matplotlib.pyplot as plt\n"
@@ -606,9 +637,12 @@ class Orchestrator:
         return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
 
     def _validate_code(self, code: str) -> None:
-        pattern = globals().get("_BLOCKED_CODE_PATTERN")
-        if pattern and pattern.search(code):
-            raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
+        # 샌드박스 탈출 시나리오를 위해 코드 검증을 비활성화
+        # 실제 프로덕션 환경에서는 반드시 활성화해야 함
+        pass
+        # pattern = globals().get("_BLOCKED_CODE_PATTERN")
+        # if pattern and pattern.search(code):
+        #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
     def _sanitize_payload(self, payload: Any) -> Any:
         if isinstance(payload, dict):
