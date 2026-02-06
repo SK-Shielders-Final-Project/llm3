@@ -10,6 +10,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
+from app.clients.guardrail_client import GuardrailClient
 from app.clients.llm_client import LlmClient
 from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
@@ -50,18 +51,30 @@ class Orchestrator:
         llm_client: LlmClient,
         sandbox_client: SandboxClient,
         registry: FunctionRegistry,
+        guardrail_client: GuardrailClient | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.sandbox_client = sandbox_client
         self.registry = registry
+        self.guardrail_client = guardrail_client
         self.rag_pipeline = RagPipeline(llm_client)
 
     def handle_user_request(self, message: LlmMessage) -> dict[str, Any]:
         logger = logging.getLogger("orchestrator")
         start = time.monotonic()
 
+        guardrail_input = self._apply_guardrail_input(message.content, logger)
+        if guardrail_input.get("blocked"):
+            return {
+                "text": guardrail_input.get("text", "요청이 가드레일 정책에 의해 차단되었습니다."),
+                "model": "bedrock-guardrail",
+                "tools_used": [],
+                "images": [],
+            }
+        user_prompt = guardrail_input.get("text", message.content)
+
         rag_plan = self.rag_pipeline.plan_tool_selection(
-            question=message.content,
+            question=user_prompt,
             user_id=message.user_id,
             admin_level=getattr(message, "admin_level", None),
         )
@@ -83,7 +96,7 @@ class Orchestrator:
 
         ## LLM 첫 호출: 도구 호출 계획
         user_content = (
-            f"사용자 요청: {message.content}\n"
+            f"사용자 요청: {user_prompt}\n"
             f"컨텍스트:\n{rag_context}"
         )
         messages = [
@@ -117,6 +130,7 @@ class Orchestrator:
         
         if not tool_calls:
             final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
+            final_text = self._apply_guardrail_output(final_text, logger)
             self._store_chat_history(
                 user_id=message.user_id,
                 question=message.content,
@@ -211,12 +225,13 @@ class Orchestrator:
         ]
 
         ## LLM의 2차 응답
-        final_response = self.llm_client.create_completion(messages=final_messages, tools=tools)
+        final_response = self.llm_client.create_completion(messages=final_messages, tools=[])
         logger.info(
             "LLM 최종 응답 elapsed=%.2fs",
             time.monotonic() - start,
         )
         final_text = self._sanitize_text(final_response.content or "")
+        final_text = self._apply_guardrail_output(final_text, logger)
         self._store_chat_history(
             user_id=message.user_id,
             question=message.content,
@@ -232,6 +247,35 @@ class Orchestrator:
             "tools_used": tools_used,
             "images": [],
         }
+
+    def _apply_guardrail_input(self, text: str, logger: logging.Logger) -> dict[str, Any]:
+        if not self.guardrail_client:
+            return {"blocked": False, "text": text}
+        try:
+            decision = self.guardrail_client.apply(text=text, source="INPUT")
+        except Exception:
+            logger.exception("Guardrail INPUT 적용 실패")
+            raise
+        output_text = decision.output_text or ""
+        if decision.action != "NONE" and not output_text:
+            return {
+                "blocked": True,
+                "text": "요청이 가드레일 정책에 의해 차단되었습니다.",
+            }
+        return {"blocked": False, "text": output_text or text}
+
+    def _apply_guardrail_output(self, text: str, logger: logging.Logger) -> str:
+        if not self.guardrail_client:
+            return text
+        try:
+            decision = self.guardrail_client.apply(text=text, source="OUTPUT")
+        except Exception:
+            logger.exception("Guardrail OUTPUT 적용 실패")
+            raise
+        output_text = decision.output_text or ""
+        if decision.action != "NONE" and not output_text:
+            return "응답이 가드레일 정책에 의해 차단되었습니다."
+        return output_text or text
 
     def _store_chat_history(
         self,
