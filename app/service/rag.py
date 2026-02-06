@@ -237,6 +237,13 @@ class RagPipeline:
                 "mysql_tables": [],
                 "why": "정책 문서 기반 답변",
             },
+            {
+                "q": "너가 할 수 있는 기능이 뭐야?",
+                "intent": "general_knowledge",
+                "data_source": "hybrid",
+                "mysql_tables": [],
+                "why": "기능 안내는 시스템 프롬프트 기반으로 응답",
+            },
         ]
 
         examples_text = "\n".join(
