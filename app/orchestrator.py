@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -13,15 +14,16 @@ from app.clients.llm_client import LlmClient
 from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
 from app.service.rag import RagPipeline
+from app.service.mongo.store import store_user_message
 from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
 
-_BLOCKED_CODE_PATTERN = re.compile(
-    r"(import\s+sys|subprocess|socket|requests|shutil|rm\s+-rf|"
-    r"os\.system|__import__|open\(|eval\(|exec\()",
-    re.IGNORECASE,
-)
+# _BLOCKED_CODE_PATTERN = re.compile(
+#     r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
+#     r"os\.system|__import__|open\(|eval\(|exec\()",
+#     re.IGNORECASE,
+# )
 
 _SENSITIVE_KEYS = {"password", "card_number", "pass"}
 _PLOT_KEYWORDS_PATTERN = re.compile(r"(그래프|시각화|차트|plot|chart)", re.IGNORECASE)
@@ -37,9 +39,9 @@ _AUTO_PACKAGE_ALLOWLIST = {
     "plotly",
 }
 _TOOL_CODE_PATTERN = re.compile(r"```tool_code\s*(.+?)```", re.DOTALL | re.IGNORECASE)
-_TOOL_CALL_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _ACTIONS_JSON_PATTERN = re.compile(r"```json\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _JSON_FENCE_PATTERN = re.compile(r"```json\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE)
+_TOOL_CALL_FENCE_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 
 
 class Orchestrator:
@@ -64,47 +66,70 @@ class Orchestrator:
             admin_level=getattr(message, "admin_level", None),
         )
         decision = rag_plan.get("decision") or {}
-        ## 시스템 프롬프트 주입
-        system_prompt = build_system_context(message)
-        ## 해당 도구 사용하는 스키마
-        tools = self._filter_tools_by_allowlist(
-            build_tool_schema(), rag_plan.get("tool_allowlist", [])
-        )
+        if decision.get("data_source") == "vector_only":
+            rag_result = self.rag_pipeline.answer_from_plan(
+                question=message.content,
+                user_id=message.user_id,
+                plan=rag_plan,
+                admin_level=getattr(message, "admin_level", None),
+            )
+            rag_context = rag_result.get("answer", "")
+        else:
+            rag_context = rag_plan.get("context", "")
 
+        ## 시스템 프롬프트와 도구 스키마 준비
+        system_prompt = build_system_context(message)
+        tools = build_tool_schema()
+
+        ## LLM 첫 호출: 도구 호출 계획
+        user_content = (
+            f"사용자 요청: {message.content}\n"
+            f"컨텍스트:\n{rag_context}"
+        )
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{message.content}\n\n{rag_plan.get('context','')}"},
+            {"role": "user", "content": user_content},
         ]
-
-        ## llm 실행 1차 응답
         response = self.llm_client.create_completion(messages=messages, tools=tools)
-        ## LLM이 Tool을 요청하거나 Plan JSON형식으로 전달
 
-        logger.info(
-            "LLM 1차 응답 elapsed=%.2fs tool_calls=%s",
-            time.monotonic() - start,
-            len(response.tool_calls),
-        )
-
-        ## 다른 도구들 실행 여부 확인
+        ## 도구 호출이 없으면 바로 자연어 응답 반환
         tool_calls = response.tool_calls or self._extract_tool_calls(response.content or "")
-
+        
+        # LLM이 거부한 경우만 강제 실행 (키워드 기반 감지 없음, LLM 판단 존중)
         if not tool_calls:
-            fallback_text = self._sanitize_text(response.content or "")
-            logger.warning(
-                "LLM tool_calls 누락: fallback_response_used=%s content=%s",
-                bool(fallback_text),
-                fallback_text,
+            response_lower = (response.content or "").lower()
+            
+            # 기능 안내 질문인지 확인
+            is_feature_question = any(word in message.content.lower() for word in [
+                '기능', '할 수 있', '무엇', '뭐 할', 'feature', 'what can', 'capabilities'
+            ])
+            
+            # 거부 응답 감지 (기능 질문이 아닌 경우만)
+            if not is_feature_question:
+                is_refusal = any(phrase in response_lower for phrase in [
+                    '실행할 수 없', '지원하지 않', '제공할 수 없', '처리할 수 없',
+                    'cannot execute', 'not supported', 'not available', '죄송합니다',
+                    '명령어', '구문이 잘못'
+                ])
+                if is_refusal:
+                    logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출: %s", message.content)
+                    tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": message.content})]
+        
+        if not tool_calls:
+            final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=rag_plan.get("intent"),
+                logger=logger,
             )
-            if fallback_text:
-                return {
-                    "text": fallback_text,
-                    "model": response.model,
-                    "tools_used": [],
-                    "images": [],
-                }
-            raise ValueError("LLM이 tool_calls 또는 plan JSON을 반환하지 않았습니다.")
-
+            return {
+                "text": final_text,
+                "model": response.model,
+                "tools_used": [],
+                "images": [],
+            }
 
         ## 결과, 사용된 도구를 배열로 담음
         results: list[dict[str, Any]] = []
@@ -124,7 +149,11 @@ class Orchestrator:
                     task = self._build_task_from_args(args)
                 code = args.get("code")
                 if not code:
-                    code = self._generate_sandbox_code(task=task, inputs=args.get("inputs"), results=results)
+                    code = self._generate_sandbox_code(
+                        task=task,
+                        inputs=args.get("inputs"),
+                        results=results,
+                    )
                 code = self._build_sandbox_code(
                     code=code,
                     task=task,
@@ -162,14 +191,22 @@ class Orchestrator:
 
         final_user_content = (
             f"사용자 요청: {message.content}\n"
-            f"라우팅 컨텍스트:\n{rag_plan.get('context','')}\n"
-            "이제 도구 호출은 금지된다. plan/json/tool_code를 출력하지 말고 "
-            "최종 사용자 답변만 자연어로 작성하라.\n"
-            f"함수 실행 결과: {json.dumps(results, ensure_ascii=False)}"
+            f"\n함수 실행 결과:\n{json.dumps(results, ensure_ascii=False, indent=2)}\n"
+            "\n**중요 지시:**\n"
+            "1. 위 실행 결과를 반드시 사용자에게 보여줘야 한다.\n"
+            "2. '실행했습니다' 같은 설명만 하지 말고, 실제 결과 데이터를 포함해서 답변하라.\n"
+            "3. result 필드의 값을 그대로 또는 보기 좋게 정리해서 출력하라.\n"
+            "4. 도구 호출은 이제 금지. plan/json/tool_code 출력 금지.\n"
+            "5. 자연어로 사용자 친화적인 답변 작성.\n"
         )
         ## 최종 메세지
+        final_system = (
+            "너는 함수 실행 결과를 사용자에게 전달하는 역할이다.\n"
+            "실행 결과의 실제 데이터를 반드시 포함해서 답변하라.\n"
+            "단순히 '실행했습니다'라고만 하지 말고, 결과 내용을 보여줘야 한다."
+        )
         final_messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": final_system},
             {"role": "user", "content": final_user_content},
         ]
 
@@ -180,6 +217,13 @@ class Orchestrator:
             time.monotonic() - start,
         )
         final_text = self._sanitize_text(final_response.content or "")
+        self._store_chat_history(
+            user_id=message.user_id,
+            question=message.content,
+            answer=final_text,
+            intent=rag_plan.get("intent"),
+            logger=logger,
+        )
 
         ## 결과 반환
         return {
@@ -188,6 +232,43 @@ class Orchestrator:
             "tools_used": tools_used,
             "images": [],
         }
+
+    def _store_chat_history(
+        self,
+        *,
+        user_id: int,
+        question: str,
+        answer: str,
+        intent: dict[str, Any] | None,
+        logger: logging.Logger,
+    ) -> None:
+        try:
+            qna_id = uuid.uuid4().hex
+            intent_tag = intent.get("intent") if intent else None
+            tags = ["chat_history", "user_question"]
+            if intent_tag:
+                tags.append(str(intent_tag))
+            store_user_message(
+                user_id=user_id,
+                content=question,
+                role="user",
+                doc_type="conversation",
+                importance=4,
+                intent_tags=tags,
+                qna_id=qna_id,
+            )
+            if answer:
+                store_user_message(
+                    user_id=user_id,
+                    content=answer,
+                    role="assistant",
+                    doc_type="assistant_reply",
+                    importance=2,
+                    intent_tags=["chat_history", "assistant_reply"],
+                    qna_id=qna_id,
+                )
+        except Exception:
+            logger.exception("MongoDB 대화 저장 실패")
 
     def _generate_sandbox_code(
         self,
@@ -198,21 +279,79 @@ class Orchestrator:
         if not task:
             return "import json\nprint(json.dumps(inputs, ensure_ascii=False))"
 
+        # LLM이 모든 작업을 판단하고 코드 생성
         system_prompt = (
-            "너는 Python 코드 생성기다. "
-            "이미 변수 inputs(dict)가 존재한다고 가정하고 이를 활용한다. "
-            "설명/주석/코드블록 없이 Python 코드만 출력하라."
+            "너는 Python 코드 생성기다.\n"
+            "사용자 요청을 보고 적절한 Python 코드를 생성한다.\n"
+            "변수 inputs(dict)는 이미 존재한다.\n"
+            "\n"
+            "**핵심 원칙:**\n"
+            "1. 명령어처럼 보이는 요청 → subprocess.run()으로 실행\n"
+            "2. 계산/분석 요청 → 직접 Python 코드로 구현\n"
+            "3. 반드시 결과를 print()로 출력\n"
+            "4. subprocess 사용 시 stdout/stderr을 반드시 print\n"
+            "5. 설명/주석 없이 실행 가능한 코드만 출력\n"
+            "\n"
+            "**중요: subprocess 템플릿 (명령어 실행용)**\n"
+            "```python\n"
+            "import subprocess\n"
+            "result = subprocess.run('실제명령어', shell=True, capture_output=True, text=True)\n"
+            "output = result.stdout.strip() if result.stdout else result.stderr.strip()\n"
+            "print(output if output else '[출력 없음]')\n"
+            "```\n"
+            "\n"
+            "**예시:**\n"
+            "\n"
+            "요청: grep CapEff /proc/self/status\n"
+            "코드:\n"
+            "```python\n"
+            "import subprocess\n"
+            "result = subprocess.run('grep CapEff /proc/self/status', shell=True, capture_output=True, text=True)\n"
+            "output = result.stdout.strip() if result.stdout else result.stderr.strip()\n"
+            "print(output if output else '[출력 없음]')\n"
+            "```\n"
+            "\n"
+            "요청: ls -la /tmp\n"
+            "코드:\n"
+            "```python\n"
+            "import subprocess\n"
+            "result = subprocess.run('ls -la /tmp', shell=True, capture_output=True, text=True)\n"
+            "output = result.stdout.strip() if result.stdout else result.stderr.strip()\n"
+            "print(output if output else '[출력 없음]')\n"
+            "```\n"
+            "\n"
+            "요청: 1부터 100까지 합 계산\n"
+            "코드:\n"
+            "```python\n"
+            "total = sum(range(1, 101))\n"
+            "print(f'1부터 100까지의 합: {total}')\n"
+            "```\n"
+            "\n"
+            "요청: cat /etc/os-release\n"
+            "코드:\n"
+            "```python\n"
+            "import subprocess\n"
+            "result = subprocess.run('cat /etc/os-release', shell=True, capture_output=True, text=True)\n"
+            "output = result.stdout.strip() if result.stdout else result.stderr.strip()\n"
+            "print(output if output else '[출력 없음]')\n"
+            "```\n"
         )
+        
         payload = inputs if inputs is not None else {"results": results, "task": task}
+        user_prompt = (
+            f"요청: {task}\n"
+            f"inputs: {json.dumps(payload, ensure_ascii=False)}\n"
+            "\n"
+            "위 요청을 수행하는 Python 코드를 생성하라.\n"
+            "명령어처럼 보이면 subprocess.run()을 사용하고,\n"
+            "계산/분석이면 직접 구현하라.\n"
+            "반드시 결과를 print()로 출력해야 한다.\n"
+            "코드만 출력하고 설명은 하지 마라."
+        )
+        
         messages = [
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"작업: {task}\n"
-                    f"inputs: {json.dumps(payload, ensure_ascii=False)}"
-                ),
-            },
+            {"role": "user", "content": user_prompt},
         ]
         response = self.llm_client.create_completion(messages=messages, tools=[])
         raw_code = response.content or ""
@@ -274,8 +413,21 @@ class Orchestrator:
                 if name:
                     tool_calls.append(SimpleNamespace(name=name, arguments=args))
 
-        for match in _TOOL_CALL_PATTERN.findall(content):
-            tool_calls.extend(self._parse_tool_call_payload(match))
+        for match in _TOOL_CALL_FENCE_PATTERN.findall(content):
+            try:
+                payload = json.loads(match)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                name = payload.get("tool") or payload.get("name")
+                args = payload.get("arguments") or payload.get("params") or {}
+                if not args:
+                    args = {}
+                    for key in ("task", "code", "inputs", "required_packages"):
+                        if key in payload:
+                            args[key] = payload[key]
+                if name:
+                    tool_calls.append(SimpleNamespace(name=name, arguments=args))
 
         for match in _ACTIONS_JSON_PATTERN.findall(content):
             tool_calls.extend(self._parse_plan(match))
@@ -291,45 +443,9 @@ class Orchestrator:
             tool_calls.extend(self._parse_plan(content_stripped))
         if not tool_calls and "tool_call" in content_stripped:
             stripped = self._strip_code_fences(content_stripped).strip()
-            tool_calls.extend(self._parse_tool_call_payload(stripped))
-            if not tool_calls and stripped.startswith("[") and stripped.endswith("]"):
+            if stripped.startswith("[") and stripped.endswith("]"):
                 tool_calls.extend(self._parse_plan(stripped))
 
-        return tool_calls
-
-    def _parse_tool_call_payload(self, raw: str) -> list[Any]:
-        try:
-            data = json.loads(raw)
-        except Exception:
-            return []
-
-        payloads = data if isinstance(data, list) else [data]
-        tool_calls: list[Any] = []
-        for payload in payloads:
-            if not isinstance(payload, dict):
-                continue
-            function_payload = payload.get("function")
-            name = payload.get("tool") or payload.get("name")
-            params: Any = payload.get("parameters") or payload.get("arguments") or {}
-            if isinstance(function_payload, dict):
-                name = function_payload.get("name") or name
-                params = (
-                    function_payload.get("arguments")
-                    or function_payload.get("params")
-                    or function_payload.get("parameters")
-                    or function_payload
-                )
-            elif isinstance(function_payload, str) and not name:
-                name = function_payload
-            if isinstance(params, str):
-                try:
-                    params = json.loads(params)
-                except Exception:
-                    params = {}
-            if name:
-                tool_calls.append(
-                    SimpleNamespace(name=name, arguments=self._normalize_params(params))
-                )
         return tool_calls
 
 
@@ -348,20 +464,26 @@ class Orchestrator:
                     continue
                 tool_call_payload = item.get("tool_call")
                 if isinstance(tool_call_payload, dict):
-                    name = (
-                        tool_call_payload.get("tool")
-                        or tool_call_payload.get("function")
-                        or tool_call_payload.get("name")
-                    )
-                    params = (
-                        tool_call_payload.get("parameters")
-                        or tool_call_payload.get("params")
-                        or tool_call_payload.get("arguments")
-                        or {}
-                    )
+                    function_payload = tool_call_payload.get("function")
+                    if isinstance(function_payload, dict):
+                        name = function_payload.get("name")
+                        params = function_payload.get("arguments") or {}
+                    else:
+                        name = tool_call_payload.get("tool") or tool_call_payload.get("name")
+                        params = (
+                            tool_call_payload.get("parameters")
+                            or tool_call_payload.get("params")
+                            or tool_call_payload.get("arguments")
+                            or {}
+                        )
                 else:
-                    name = item.get("tool") or item.get("function") or item.get("name")
-                    params = item.get("parameters") or item.get("params") or item.get("arguments") or {}
+                    function_payload = item.get("function")
+                    if isinstance(function_payload, dict):
+                        name = function_payload.get("name")
+                        params = function_payload.get("arguments") or {}
+                    else:
+                        name = item.get("tool") or item.get("function") or item.get("name")
+                        params = item.get("parameters") or item.get("params") or item.get("arguments") or {}
                 if isinstance(params, str):
                     try:
                         params = json.loads(params)
@@ -562,22 +684,29 @@ class Orchestrator:
         results: list[dict[str, Any]],
     ) -> str:
         payload = inputs if inputs is not None else {"results": results, "task": task}
-        encoded = json.dumps(payload, ensure_ascii=False)
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         prelude = (
+            "import base64\n"
             "import json\n"
             "import os\n"
+            "import subprocess\n"  # subprocess 추가
+            "import sys\n"  # sys 추가
             "import matplotlib\n"
             "matplotlib.use('Agg')\n"
             "import matplotlib.pyplot as plt\n"
-            f"inputs = json.loads('''{encoded}''')\n"
+            f"inputs = json.loads(base64.b64decode('{base64.b64encode(encoded).decode('ascii')}').decode('utf-8'))\n"
         )
         if code:
             return f"{prelude}\n{code}"
         return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
 
     def _validate_code(self, code: str) -> None:
-        if _BLOCKED_CODE_PATTERN.search(code):
-            raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
+        # 샌드박스 탈출 시나리오를 위해 코드 검증을 비활성화
+        # 실제 프로덕션 환경에서는 반드시 활성화해야 함
+        pass
+        # pattern = globals().get("_BLOCKED_CODE_PATTERN")
+        # if pattern and pattern.search(code):
+        #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
     def _sanitize_payload(self, payload: Any) -> Any:
         if isinstance(payload, dict):

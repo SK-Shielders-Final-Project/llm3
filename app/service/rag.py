@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
@@ -21,6 +23,8 @@ from app.service.registry import (
     get_total_usage,
     get_user_profile,
 )
+
+logger = logging.getLogger(__name__)
 
 IntentType = Literal["personal_data", "general_knowledge", "realtime_location", "admin_function"]
 DataSourceType = Literal["vector_only", "mysql_only", "hybrid"]
@@ -89,6 +93,42 @@ class RagPipeline:
         mysql_data = self._fetch_mysql_data(
             intent=intent, user_id=user_id, admin_level=admin_level, decision=decision
         )
+        answer = self._generate_answer(question, intent, docs, mysql_data)
+        self._store_conversation(user_id=user_id, question=question, answer=answer, intent=intent)
+        return {
+            "answer": answer,
+            "intent": intent,
+            "decision": decision,
+            "vector_docs": docs,
+            "mysql_data": mysql_data,
+        }
+
+    def answer_from_plan(
+        self,
+        *,
+        question: str,
+        user_id: int,
+        plan: dict[str, Any],
+        admin_level: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        plan_tool_selection에서 생성된 결과를 재사용해 답변을 만든다.
+        vector_only 경로에서 중복 검색/분류를 줄이기 위해 사용한다.
+        """
+        intent = plan.get("intent") or {}
+        docs = plan.get("vector_docs") or []
+        decision = plan.get("decision") or {}
+        resolved_admin = self._resolve_admin_level(user_id, admin_level)
+
+        mysql_data: dict[str, Any] | None = None
+        if decision.get("data_source") in {"mysql_only", "hybrid"}:
+            mysql_data = self._fetch_mysql_data(
+                intent=intent,
+                user_id=user_id,
+                admin_level=resolved_admin,
+                decision=decision,
+            )
+
         answer = self._generate_answer(question, intent, docs, mysql_data)
         self._store_conversation(user_id=user_id, question=question, answer=answer, intent=intent)
         return {
@@ -428,6 +468,7 @@ class RagPipeline:
         self, user_id: int, question: str, answer: str, intent: dict[str, Any]
     ) -> None:
         try:
+            qna_id = uuid.uuid4().hex
             intent_tag = intent.get("intent") if intent else None
             tags = ["chat_history", "user_question"]
             if intent_tag:
@@ -439,6 +480,7 @@ class RagPipeline:
                 doc_type="conversation",
                 importance=4,
                 intent_tags=tags,
+                qna_id=qna_id,
             )
             if answer:
                 store_user_message(
@@ -448,9 +490,11 @@ class RagPipeline:
                     doc_type="assistant_reply",
                     importance=2,
                     intent_tags=["chat_history", "assistant_reply"],
+                    qna_id=qna_id,
                 )
         except Exception:
             # 저장 실패는 응답 생성에 영향 주지 않음
+            logger.exception("MongoDB 대화 저장 실패")
             return
 
     def _select_allowed_tools(
