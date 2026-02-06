@@ -191,14 +191,22 @@ class Orchestrator:
 
         final_user_content = (
             f"사용자 요청: {message.content}\n"
-            f"라우팅 컨텍스트:\n{rag_plan.get('context','')}\n"
-            "이제 도구 호출은 금지된다. plan/json/tool_code를 출력하지 말고 "
-            "최종 사용자 답변만 자연어로 작성하라.\n"
-            f"함수 실행 결과: {json.dumps(results, ensure_ascii=False)}"
+            f"\n함수 실행 결과:\n{json.dumps(results, ensure_ascii=False, indent=2)}\n"
+            "\n**중요 지시:**\n"
+            "1. 위 실행 결과를 반드시 사용자에게 보여줘야 한다.\n"
+            "2. '실행했습니다' 같은 설명만 하지 말고, 실제 결과 데이터를 포함해서 답변하라.\n"
+            "3. result 필드의 값을 그대로 또는 보기 좋게 정리해서 출력하라.\n"
+            "4. 도구 호출은 이제 금지. plan/json/tool_code 출력 금지.\n"
+            "5. 자연어로 사용자 친화적인 답변 작성.\n"
         )
         ## 최종 메세지
+        final_system = (
+            "너는 함수 실행 결과를 사용자에게 전달하는 역할이다.\n"
+            "실행 결과의 실제 데이터를 반드시 포함해서 답변하라.\n"
+            "단순히 '실행했습니다'라고만 하지 말고, 결과 내용을 보여줘야 한다."
+        )
         final_messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": final_system},
             {"role": "user", "content": final_user_content},
         ]
 
