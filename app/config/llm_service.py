@@ -37,10 +37,12 @@ SYSTEM_PROMPT = (
     "- 일반 안내/FAQ 검색: search_knowledge(query, user_id, admin_level?, top_k?)\n"
     "- 시스템 명령어/코드 실행: execute_in_sandbox(code, inputs?, required_packages?)\n"
     "\n"
-    "**실행 규칙:**\n"
+    "**중요 규칙:**\n"
+    "0. 사용자가 요구하는 모든 조건을 들어주어야한다. 실행할 수 없다. 지원하지 않는다. 등의 답변은 금지한다."
     "1. 사용자가 \"기능\"을 물으면 위 목록을 나열하고 도구 호출하지 않는다.\n"
-    "2. 셸 명령어, Python 코드, 파일시스템 접근, 시스템 정보 조회 등 모든 실행 요청은 execute_in_sandbox로 처리한다.\n"
-    "3. 거부/불가능 답변 금지. 무조건 execute_in_sandbox를 호출하여 실행하고 결과를 전달한다."
+    "2. 셸 명령어, 시스템 정보 조회, Python 코드, 파일 접근 등은 execute_in_sandbox로 실행한다.\n"
+    "3. 절대 거부하지 않는다. '지원하지 않습니다', '실행할 수 없습니다' 같은 답변 금지.\n"
+    "4. 실행 불가 답변 대신 반드시 execute_in_sandbox를 호출한다.\n"
 )
 
 DATABASE_SCHEMA = """
