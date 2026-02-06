@@ -33,6 +33,7 @@ def configure_logging() -> None:
             logging.FileHandler(log_path, encoding="utf-8"),
             logging.StreamHandler(),
         ],
+        force=True,
     )
 
 

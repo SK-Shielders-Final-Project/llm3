@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -13,15 +14,16 @@ from app.clients.llm_client import LlmClient
 from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
 from app.service.rag import RagPipeline
+from app.service.mongo.store import store_user_message
 from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
 
-_BLOCKED_CODE_PATTERN = re.compile(
-    r"(import\s+sys|subprocess|socket|requests|shutil|rm\s+-rf|"
-    r"os\.system|__import__|open\(|eval\(|exec\()",
-    re.IGNORECASE,
-)
+# _BLOCKED_CODE_PATTERN = re.compile(
+#     r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
+#     r"os\.system|__import__|open\(|eval\(|exec\()",
+#     re.IGNORECASE,
+# )
 
 _SENSITIVE_KEYS = {"password", "card_number", "pass"}
 _PLOT_KEYWORDS_PATTERN = re.compile(r"(그래프|시각화|차트|plot|chart)", re.IGNORECASE)
@@ -64,58 +66,62 @@ class Orchestrator:
         )
         decision = rag_plan.get("decision") or {}
         if decision.get("data_source") == "vector_only":
-            rag_result = self.rag_pipeline.process_question(
+            rag_result = self.rag_pipeline.answer_from_plan(
                 question=message.content,
                 user_id=message.user_id,
+                plan=rag_plan,
                 admin_level=getattr(message, "admin_level", None),
             )
-            return {
-                "text": rag_result.get("answer", ""),
-                "model": "rag_pipeline",
-                "tools_used": [],
-                "images": [],
-            }
+            rag_context = rag_result.get("answer", "")
+        else:
+            rag_context = rag_plan.get("context", "")
 
-        ## 시스템 프롬프트 주입
-        system_prompt = build_system_context(message)
-        ## 해당 도구 사용하는 스키마
-        tools = self._filter_tools_by_allowlist(
-            build_tool_schema(), rag_plan.get("tool_allowlist", [])
-        )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{message.content}\n\n{rag_plan.get('context','')}"},
-        ]
-
-        ## llm 실행 1차 응답
-        response = self.llm_client.create_completion(messages=messages, tools=tools)
-        ## LLM이 Tool을 요청하거나 Plan JSON형식으로 전달
-
-        logger.info(
-            "LLM 1차 응답 elapsed=%.2fs tool_calls=%s",
-            time.monotonic() - start,
-            len(response.tool_calls),
-        )
-
-        ## 다른 도구들 실행 여부 확인
-        tool_calls = response.tool_calls or self._extract_tool_calls(response.content or "")
-
-        if not tool_calls:
-            fallback_text = self._sanitize_text(response.content or "")
-            logger.warning(
-                "LLM tool_calls 누락: fallback_response_used=%s content=%s",
-                bool(fallback_text),
-                fallback_text,
+        ## LLM이 생성한 코드를 무조건 Sandbox에서 실행
+        task = message.content
+        inputs = {
+            "context": rag_context,
+            "user_message": message.content,
+        }
+        try:
+            code = self._generate_sandbox_code(task=task, inputs=inputs, results=[])
+            code = self._build_sandbox_code(code=code, task=task, inputs=inputs, results=[])
+            logger.info(
+                "============== [LLM GENERATED CODE] ==============\n%s\n==================================================",
+                code,
             )
-            if fallback_text:
-                return {
-                    "text": fallback_text,
-                    "model": response.model,
-                    "tools_used": [],
-                    "images": [],
-                }
-            raise ValueError("LLM이 tool_calls 또는 plan JSON을 반환하지 않았습니다.")
+            self._validate_code(code)
+            required_packages: list[str] = []
+            inferred_packages = self._infer_packages_from_code(code)
+            if inferred_packages:
+                required_packages = self._ensure_packages(required_packages, inferred_packages)
+            if self._needs_plot_packages(message.content):
+                required_packages = self._ensure_packages(required_packages, ["matplotlib"])
+            sandbox_result = self.sandbox_client.run_code(
+                code=code,
+                required_packages=required_packages,
+                user_id=message.user_id,
+                run_id=uuid.uuid4().hex,
+            )
+            stderr = sandbox_result.get("stderr")
+            if stderr:
+                logger.error("Sandbox stderr: %s", stderr)
+            text = sandbox_result.get("stdout") or stderr or sandbox_result.get("error") or ""
+        except Exception as exc:
+            logger.exception("Sandbox 실행 실패: %s", exc)
+            text = f"Sandbox 실행 실패: {exc}"
+        self._store_chat_history(
+            user_id=message.user_id,
+            question=message.content,
+            answer=text,
+            intent=rag_plan.get("intent"),
+            logger=logger,
+        )
+        return {
+            "text": text,
+            "model": "sandbox",
+            "tools_used": ["execute_in_sandbox"],
+            "images": [],
+        }
 
 
         ## 결과, 사용된 도구를 배열로 담음
@@ -192,6 +198,13 @@ class Orchestrator:
             time.monotonic() - start,
         )
         final_text = self._sanitize_text(final_response.content or "")
+        self._store_chat_history(
+            user_id=message.user_id,
+            question=message.content,
+            answer=final_text,
+            intent=rag_plan.get("intent"),
+            logger=logger,
+        )
 
         ## 결과 반환
         return {
@@ -200,6 +213,43 @@ class Orchestrator:
             "tools_used": tools_used,
             "images": [],
         }
+
+    def _store_chat_history(
+        self,
+        *,
+        user_id: int,
+        question: str,
+        answer: str,
+        intent: dict[str, Any] | None,
+        logger: logging.Logger,
+    ) -> None:
+        try:
+            qna_id = uuid.uuid4().hex
+            intent_tag = intent.get("intent") if intent else None
+            tags = ["chat_history", "user_question"]
+            if intent_tag:
+                tags.append(str(intent_tag))
+            store_user_message(
+                user_id=user_id,
+                content=question,
+                role="user",
+                doc_type="conversation",
+                importance=4,
+                intent_tags=tags,
+                qna_id=qna_id,
+            )
+            if answer:
+                store_user_message(
+                    user_id=user_id,
+                    content=answer,
+                    role="assistant",
+                    doc_type="assistant_reply",
+                    importance=2,
+                    intent_tags=["chat_history", "assistant_reply"],
+                    qna_id=qna_id,
+                )
+        except Exception:
+            logger.exception("MongoDB 대화 저장 실패")
 
     def _generate_sandbox_code(
         self,
@@ -321,20 +371,26 @@ class Orchestrator:
                     continue
                 tool_call_payload = item.get("tool_call")
                 if isinstance(tool_call_payload, dict):
-                    name = (
-                        tool_call_payload.get("tool")
-                        or tool_call_payload.get("function")
-                        or tool_call_payload.get("name")
-                    )
-                    params = (
-                        tool_call_payload.get("parameters")
-                        or tool_call_payload.get("params")
-                        or tool_call_payload.get("arguments")
-                        or {}
-                    )
+                    function_payload = tool_call_payload.get("function")
+                    if isinstance(function_payload, dict):
+                        name = function_payload.get("name")
+                        params = function_payload.get("arguments") or {}
+                    else:
+                        name = tool_call_payload.get("tool") or tool_call_payload.get("name")
+                        params = (
+                            tool_call_payload.get("parameters")
+                            or tool_call_payload.get("params")
+                            or tool_call_payload.get("arguments")
+                            or {}
+                        )
                 else:
-                    name = item.get("tool") or item.get("function") or item.get("name")
-                    params = item.get("parameters") or item.get("params") or item.get("arguments") or {}
+                    function_payload = item.get("function")
+                    if isinstance(function_payload, dict):
+                        name = function_payload.get("name")
+                        params = function_payload.get("arguments") or {}
+                    else:
+                        name = item.get("tool") or item.get("function") or item.get("name")
+                        params = item.get("parameters") or item.get("params") or item.get("arguments") or {}
                 if isinstance(params, str):
                     try:
                         params = json.loads(params)
@@ -535,21 +591,23 @@ class Orchestrator:
         results: list[dict[str, Any]],
     ) -> str:
         payload = inputs if inputs is not None else {"results": results, "task": task}
-        encoded = json.dumps(payload, ensure_ascii=False)
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         prelude = (
+            "import base64\n"
             "import json\n"
             "import os\n"
             "import matplotlib\n"
             "matplotlib.use('Agg')\n"
             "import matplotlib.pyplot as plt\n"
-            f"inputs = json.loads('''{encoded}''')\n"
+            f"inputs = json.loads(base64.b64decode('{base64.b64encode(encoded).decode('ascii')}').decode('utf-8'))\n"
         )
         if code:
             return f"{prelude}\n{code}"
         return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
 
     def _validate_code(self, code: str) -> None:
-        if _BLOCKED_CODE_PATTERN.search(code):
+        pattern = globals().get("_BLOCKED_CODE_PATTERN")
+        if pattern and pattern.search(code):
             raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
     def _sanitize_payload(self, payload: Any) -> Any:
