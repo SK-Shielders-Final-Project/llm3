@@ -37,6 +37,7 @@ _AUTO_PACKAGE_ALLOWLIST = {
     "plotly",
 }
 _TOOL_CODE_PATTERN = re.compile(r"```tool_code\s*(.+?)```", re.DOTALL | re.IGNORECASE)
+_TOOL_CALL_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _ACTIONS_JSON_PATTERN = re.compile(r"```json\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _JSON_FENCE_PATTERN = re.compile(r"```json\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE)
 
@@ -273,6 +274,9 @@ class Orchestrator:
                 if name:
                     tool_calls.append(SimpleNamespace(name=name, arguments=args))
 
+        for match in _TOOL_CALL_PATTERN.findall(content):
+            tool_calls.extend(self._parse_tool_call_payload(match))
+
         for match in _ACTIONS_JSON_PATTERN.findall(content):
             tool_calls.extend(self._parse_plan(match))
 
@@ -287,9 +291,45 @@ class Orchestrator:
             tool_calls.extend(self._parse_plan(content_stripped))
         if not tool_calls and "tool_call" in content_stripped:
             stripped = self._strip_code_fences(content_stripped).strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
+            tool_calls.extend(self._parse_tool_call_payload(stripped))
+            if not tool_calls and stripped.startswith("[") and stripped.endswith("]"):
                 tool_calls.extend(self._parse_plan(stripped))
 
+        return tool_calls
+
+    def _parse_tool_call_payload(self, raw: str) -> list[Any]:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return []
+
+        payloads = data if isinstance(data, list) else [data]
+        tool_calls: list[Any] = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            function_payload = payload.get("function")
+            name = payload.get("tool") or payload.get("name")
+            params: Any = payload.get("parameters") or payload.get("arguments") or {}
+            if isinstance(function_payload, dict):
+                name = function_payload.get("name") or name
+                params = (
+                    function_payload.get("arguments")
+                    or function_payload.get("params")
+                    or function_payload.get("parameters")
+                    or function_payload
+                )
+            elif isinstance(function_payload, str) and not name:
+                name = function_payload
+            if isinstance(params, str):
+                try:
+                    params = json.loads(params)
+                except Exception:
+                    params = {}
+            if name:
+                tool_calls.append(
+                    SimpleNamespace(name=name, arguments=self._normalize_params(params))
+                )
         return tool_calls
 
 
