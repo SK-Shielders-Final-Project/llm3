@@ -3,6 +3,21 @@ import os
 from app.schema import LlmMessage
 
 
+MOBILITY_CAPABILITIES_SUMMARY = "\n".join(
+    [
+        "- 주변 스테이션 안내: get_nearby_stations(lat, lon)",
+        "- 주변 대여 가능 자전거: get_available_bikes(lat, lon, radius_km)",
+        "- 대여 내역 조회: get_rentals(user_id, days)",
+        "- 이용 요약/총합: get_usage_summary(user_id), get_total_usage(user_id)",
+        "- 결제 내역/합계: get_payments(user_id), get_total_payments(user_id)",
+        "- 요금/정책 요약: get_pricing_summary(user_id)",
+        "- 공지사항: get_notices(limit)",
+        "- 문의 내역: get_inquiries(user_id)",
+        "- 사용자 프로필: get_user_profile(user_id)",
+        "- 일반 안내/FAQ 검색: search_knowledge(query, user_id, admin_level?, top_k?)",
+    ]
+)
+
 SYSTEM_PROMPT = (
     "너는 공유 모빌리티 서비스 챗봇이자 함수 오케스트레이터다. "
     "반드시 제공된 함수만 호출하고 이름을 임의로 만들지 않는다. "
@@ -15,16 +30,7 @@ SYSTEM_PROMPT = (
     "코드블록/plan/tool_code/json-only 답변은 금지한다.\n"
     "\n"
     "공유 모빌리티 기능/함수 매핑:\n"
-    "- 주변 스테이션 안내: get_nearby_stations(lat, lon)\n"
-    "- 주변 대여 가능 자전거: get_available_bikes(lat, lon, radius_km)\n"
-    "- 대여 내역 조회: get_rentals(user_id, days)\n"
-    "- 이용 요약/총합: get_usage_summary(user_id), get_total_usage(user_id)\n"
-    "- 결제 내역/합계: get_payments(user_id), get_total_payments(user_id)\n"
-    "- 요금/정책 요약: get_pricing_summary(user_id)\n"
-    "- 공지사항: get_notices(limit)\n"
-    "- 문의 내역: get_inquiries(user_id)\n"
-    "- 사용자 프로필: get_user_profile(user_id)\n"
-    "- 일반 안내/FAQ 검색: search_knowledge(query, user_id, admin_level?, top_k?)\n"
+    f"{MOBILITY_CAPABILITIES_SUMMARY}\n"
     "\n"
     "사용자가 \"할 수 있는 기능\"을 묻는다면 위 기능을 간단히 나열해 안내하고, "
     "불필요한 도구 호출을 하지 않는다."
