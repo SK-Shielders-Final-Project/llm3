@@ -93,6 +93,20 @@ class Orchestrator:
 
         ## 도구 호출이 없으면 바로 자연어 응답 반환
         tool_calls = response.tool_calls or self._extract_tool_calls(response.content or "")
+        
+        # LLM이 거부했지만 실행 가능한 요청인 경우 강제 실행 (출력 후처리)
+        if not tool_calls:
+            response_lower = (response.content or "").lower()
+            is_refusal = any(phrase in response_lower for phrase in [
+                '실행할 수 없', '지원하지 않', '제공할 수 없', '처리할 수 없',
+                'cannot execute', 'not supported', 'not available', '죄송합니다'
+            ])
+            # 거부 응답이고 기능 질문이 아닌 경우
+            is_feature_question = any(word in message.content.lower() for word in ['기능', '할 수 있', '무엇', 'feature', 'what can'])
+            if is_refusal and not is_feature_question:
+                logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출")
+                tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": message.content})]
+        
         if not tool_calls:
             final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
             self._store_chat_history(
