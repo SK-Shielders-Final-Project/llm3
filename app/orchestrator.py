@@ -245,34 +245,37 @@ class Orchestrator:
         if not task:
             return "import json\nprint(json.dumps(inputs, ensure_ascii=False))"
 
+        # 셸 명령어인 경우 직접 subprocess 코드 생성 (LLM 우회)
+        task_stripped = task.strip()
+        shell_commands = ['grep', 'cat', 'ls', 'pwd', 'find', 'echo', 'ps', 'id', 'whoami', 'env', 'uname', 'df', 'free', 'top', 'mount']
+        is_shell_command = (
+            any(task_stripped.startswith(cmd) for cmd in shell_commands) or
+            '/proc/' in task_stripped or
+            '/sys/' in task_stripped or
+            '/etc/' in task_stripped
+        )
+        
+        if is_shell_command:
+            # 직접 subprocess 코드 생성
+            return (
+                "import subprocess\n"
+                f"result = subprocess.run({repr(task)}, shell=True, capture_output=True, text=True)\n"
+                "output = result.stdout if result.stdout else result.stderr\n"
+                "print(output.strip() if output else '[명령 실행 완료 - 출력 없음]')"
+            )
+
+        # 일반 작업은 LLM이 코드 생성
         system_prompt = (
             "너는 Python 코드 생성기다. 사용자 요청을 항상 실행 가능한 코드로 변환한다.\n"
             "이미 변수 inputs(dict)가 존재한다고 가정한다.\n"
-            "\n"
-            "**시스템 명령어 실행 규칙:**\n"
-            "사용자 입력이 셸 명령어(grep, cat, ls, find, /proc/, /sys/ 등)이면:\n"
-            "1. import subprocess 사용\n"
-            "2. 명령어를 그대로 subprocess.run()에 전달\n"
-            "3. shell=True, capture_output=True, text=True 사용\n"
-            "4. stdout 또는 stderr를 print()로 출력\n"
-            "\n"
-            "**코드 생성 규칙:**\n"
-            "- 설명/주석/마크다운 없이 Python 코드만 출력\n"
-            "- 실행 가능한 완전한 코드 생성\n"
-            "- 거부/오류 메시지 절대 금지\n"
-            "- 문법 오류 없는 올바른 코드만 생성"
+            "설명/주석/마크다운 없이 Python 코드만 출력하라."
         )
         payload = inputs if inputs is not None else {"results": results, "task": task}
-        user_prompt = f"작업: {task}\n"
-        # 셸 명령어인 경우 직접 subprocess 코드 템플릿 제공
-        if task and any(task.strip().startswith(cmd) for cmd in ['grep', 'cat', 'ls', 'pwd', 'find', 'echo', 'ps', 'id', 'whoami', 'env', 'uname']):
-            user_prompt += f"\n이것은 셸 명령어다. 다음 템플릿을 사용하라:\n"
-            user_prompt += f"import subprocess\n"
-            user_prompt += f"result = subprocess.run('{task}', shell=True, capture_output=True, text=True)\n"
-            user_prompt += f"print(result.stdout if result.stdout else result.stderr)"
-        else:
-            user_prompt += f"inputs: {json.dumps(payload, ensure_ascii=False)}\n"
-            user_prompt += "위 작업을 수행하는 Python 코드를 생성하라."
+        user_prompt = (
+            f"작업: {task}\n"
+            f"inputs: {json.dumps(payload, ensure_ascii=False)}\n"
+            "위 작업을 수행하는 Python 코드를 생성하라."
+        )
         
         messages = [
             {"role": "system", "content": system_prompt},
