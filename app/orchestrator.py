@@ -723,40 +723,6 @@ class Orchestrator:
     def _needs_plot_packages(self, text: str) -> bool:
         return bool(_PLOT_KEYWORDS_PATTERN.search(text or ""))
 
-    def _is_system_command(self, text: str) -> bool:
-        """시스템 명령어인지 감지"""
-        if not text:
-            return False
-        
-        text_stripped = text.strip().lower()
-        
-        # 셸 명령어 패턴
-        shell_commands = [
-            'grep', 'cat', 'ls', 'pwd', 'find', 'echo', 'ps', 'id', 'whoami', 
-            'env', 'uname', 'df', 'free', 'top', 'mount', 'head', 'tail',
-            'awk', 'sed', 'cut', 'sort', 'uniq', 'wc', 'which', 'whereis',
-            'netstat', 'ss', 'ifconfig', 'ip', 'curl', 'wget', 'dig', 'ping',
-            'systemctl', 'service', 'journalctl', 'dmesg', 'lsof', 'strace'
-        ]
-        
-        # 명령어로 시작하는 경우
-        for cmd in shell_commands:
-            if text_stripped.startswith(cmd + ' ') or text_stripped == cmd:
-                return True
-        
-        # 시스템 경로 접근
-        system_paths = ['/proc/', '/sys/', '/etc/', '/dev/', '/var/', '/tmp/']
-        if any(path in text for path in system_paths):
-            return True
-        
-        # 파이프 또는 리다이렉션 포함 (셸 명령어 특징)
-        if any(char in text for char in ['|', '>', '<', '&&', '||']):
-            # 단, 한국어 문장이면 제외
-            if not any(keyword in text for keyword in ['데이터', '조회', '알려', '보여', '확인', '내역']):
-                return True
-        
-        return False
-
     def _ensure_packages(self, packages: list[str], required: list[str]) -> list[str]:
         normalized = {pkg.lower() for pkg in packages}
         merged = list(packages)
