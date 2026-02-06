@@ -41,6 +41,7 @@ _AUTO_PACKAGE_ALLOWLIST = {
 _TOOL_CODE_PATTERN = re.compile(r"```tool_code\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 _ACTIONS_JSON_PATTERN = re.compile(r"```json\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _JSON_FENCE_PATTERN = re.compile(r"```json\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE)
+_TOOL_CALL_FENCE_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 
 
 class Orchestrator:
@@ -352,6 +353,22 @@ class Orchestrator:
             lines = [line.strip() for line in match.splitlines() if line.strip()]
             for line in lines:
                 name, args = self._parse_tool_code_line(line)
+                if name:
+                    tool_calls.append(SimpleNamespace(name=name, arguments=args))
+
+        for match in _TOOL_CALL_FENCE_PATTERN.findall(content):
+            try:
+                payload = json.loads(match)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                name = payload.get("tool") or payload.get("name")
+                args = payload.get("arguments") or payload.get("params") or {}
+                if not args:
+                    args = {}
+                    for key in ("task", "code", "inputs", "required_packages"):
+                        if key in payload:
+                            args[key] = payload[key]
                 if name:
                     tool_calls.append(SimpleNamespace(name=name, arguments=args))
 
