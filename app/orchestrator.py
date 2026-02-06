@@ -81,20 +81,10 @@ class Orchestrator:
         tools = build_tool_schema()
 
         ## LLM 첫 호출: 도구 호출 계획
-        user_content = f"사용자 요청: {message.content}\n"
-        if rag_context:
-            user_content += f"컨텍스트:\n{rag_context}\n"
-        
-        # 코드/명령어 실행 요청 힌트 추가
-        msg_content = message.content.strip()
-        needs_execution = (
-            any(msg_content.startswith(cmd) for cmd in ['grep', 'cat', 'ls', 'pwd', 'find', 'echo', 'ps', 'id', 'whoami', 'env', 'uname', 'python', 'import']) or
-            '/proc/' in msg_content or '/sys/' in msg_content or '/etc/' in msg_content or
-            'import ' in msg_content.lower() or 'python' in msg_content.lower()
+        user_content = (
+            f"사용자 요청: {message.content}\n"
+            f"컨텍스트:\n{rag_context}"
         )
-        if needs_execution:
-            user_content += "\n[필수: 이 요청은 execute_in_sandbox 도구를 호출하여 처리해야 함. 거부하지 말 것]"
-        
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
