@@ -57,7 +57,7 @@ def build_guardrail_client_from_env() -> GuardrailClient | None:
     if not identifier:
         return None
 
-    version = os.getenv("BEDROCK_GUARDRAIL_VERSION", "0").strip() or "0"
+    version = os.getenv("BEDROCK_GUARDRAIL_VERSION", "DRAFT").strip() or "DRAFT"
     region = (
         os.getenv("AWS_REGION")
         or os.getenv("BEDROCK_GUARDRAIL_REGION")
