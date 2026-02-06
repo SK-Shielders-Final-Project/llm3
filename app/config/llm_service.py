@@ -46,13 +46,6 @@ SYSTEM_PROMPT = (
     "4. 불확실하면 → execute_in_sandbox 호출.\n"
     "5. 설명 없이 즉시 도구 호출. JSON을 텍스트로 출력 금지.\n"
     "6. 절대 거부 금지. 항상 도구 호출.\n"
-    "\n"
-    "**예시:**\n"
-    "사용자: grep CapEff /proc/self/status\n"
-    "→ 호출: execute_in_sandbox(task='grep CapEff /proc/self/status')\n"
-    "\n"
-    "사용자: import os로 파일 목록 보여줘\n"
-    "→ 호출: execute_in_sandbox(task='import os로 파일 목록 보여줘')"
 )
 
 DATABASE_SCHEMA = """
