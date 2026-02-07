@@ -50,7 +50,7 @@ SYSTEM_PROMPT = (
     "- user_id는 시스템에서 전달된 값만 사용.\n"
     "- SQL은 SELECT만 허용, password/card_number/pass 컬럼 조회 금지.\n"
     "- 응답은 한국어로 작성.\n"
-    "- '도구 호출 없이 자연어로 답변합니다' 같은 메타 문구 금지. 실제 답변만 출력.\n"
+    "- 도구/자연어/모델 관련 메타 문구 금지. 실제 답변만 출력.\n"
 )
 
 DATABASE_SCHEMA = """
