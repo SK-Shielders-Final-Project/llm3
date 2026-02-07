@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
+from app.clients.guardrail_client import GuardrailClient
 from app.clients.llm_client import LlmClient
 from app.service.mongo.search import search_knowledge
 from app.service.mongo.store import store_user_message
@@ -69,9 +70,15 @@ class RagWeights:
 
 
 class RagPipeline:
-    def __init__(self, llm_client: LlmClient, weights: RagWeights | None = None) -> None:
+    def __init__(
+        self,
+        llm_client: LlmClient,
+        weights: RagWeights | None = None,
+        guardrail_client: GuardrailClient | None = None,
+    ) -> None:
         self.llm_client = llm_client
         self.weights = weights or RagWeights()
+        self.guardrail_client = guardrail_client
 
     def process_question(
         self,
@@ -80,10 +87,11 @@ class RagPipeline:
         admin_level: int | None = None,
         top_k: int = 5,
     ) -> dict[str, Any]:
+        guarded_question = self._apply_guardrail_input(question)
         admin_level = self._resolve_admin_level(user_id, admin_level)
-        intent = self._classify_intent(question)
+        intent = self._classify_intent(guarded_question)
         raw_docs = search_knowledge(
-            query=question,
+            query=guarded_question,
             user_id=user_id,
             admin_level=admin_level,
             top_k=top_k,
@@ -93,8 +101,10 @@ class RagPipeline:
         mysql_data = self._fetch_mysql_data(
             intent=intent, user_id=user_id, admin_level=admin_level, decision=decision
         )
-        answer = self._generate_answer(question, intent, docs, mysql_data)
-        self._store_conversation(user_id=user_id, question=question, answer=answer, intent=intent)
+        answer = self._generate_answer(guarded_question, intent, docs, mysql_data)
+        self._store_conversation(
+            user_id=user_id, question=guarded_question, answer=answer, intent=intent
+        )
         return {
             "answer": answer,
             "intent": intent,
@@ -115,6 +125,7 @@ class RagPipeline:
         plan_tool_selection에서 생성된 결과를 재사용해 답변을 만든다.
         vector_only 경로에서 중복 검색/분류를 줄이기 위해 사용한다.
         """
+        guarded_question = self._apply_guardrail_input(question)
         intent = plan.get("intent") or {}
         docs = plan.get("vector_docs") or []
         decision = plan.get("decision") or {}
@@ -129,8 +140,10 @@ class RagPipeline:
                 decision=decision,
             )
 
-        answer = self._generate_answer(question, intent, docs, mysql_data)
-        self._store_conversation(user_id=user_id, question=question, answer=answer, intent=intent)
+        answer = self._generate_answer(guarded_question, intent, docs, mysql_data)
+        self._store_conversation(
+            user_id=user_id, question=guarded_question, answer=answer, intent=intent
+        )
         return {
             "answer": answer,
             "intent": intent,
@@ -146,10 +159,11 @@ class RagPipeline:
         admin_level: int | None = None,
         top_k: int = 5,
     ) -> dict[str, Any]:
+        guarded_question = self._apply_guardrail_input(question)
         admin_level = self._resolve_admin_level(user_id, admin_level)
-        intent = self._classify_intent(question)
+        intent = self._classify_intent(guarded_question)
         raw_docs = search_knowledge(
-            query=question,
+            query=guarded_question,
             user_id=user_id,
             admin_level=admin_level,
             top_k=top_k,
@@ -159,7 +173,7 @@ class RagPipeline:
         allowlist = self._select_allowed_tools(intent, docs, decision)
         
         # Manual 컬렉션 검색 (안전수칙, FAQ 등)
-        manual_docs = self._search_manual_if_relevant(question, intent)
+        manual_docs = self._search_manual_if_relevant(guarded_question, intent)
         
         context = self._build_rag_context(intent, docs, decision, manual_docs)
         return {
@@ -178,10 +192,11 @@ class RagPipeline:
         admin_level: int | None = None,
         top_k: int = 5,
     ) -> dict[str, Any]:
+        guarded_question = self._apply_guardrail_input(question)
         admin_level = self._resolve_admin_level(user_id, admin_level)
-        intent = self._classify_intent(question)
+        intent = self._classify_intent(guarded_question)
         raw_docs = search_knowledge(
-            query=question,
+            query=guarded_question,
             user_id=user_id,
             admin_level=admin_level,
             top_k=top_k,
@@ -462,7 +477,8 @@ class RagPipeline:
             ],
             tools=[],
         )
-        return (response.content or "").strip()
+        answer = (response.content or "").strip()
+        return self._apply_guardrail_output(answer)
 
     def _store_conversation(
         self, user_id: int, question: str, answer: str, intent: dict[str, Any]
@@ -620,6 +636,20 @@ class RagPipeline:
             if tags.intersection({"personal_data", "realtime_location", "transaction", "history"}):
                 return 1.0
         return 0.0
+
+    def _apply_guardrail_input(self, text: str) -> str:
+        if not self.guardrail_client:
+            return text
+        decision = self.guardrail_client.apply(text=text, source="INPUT")
+        cleaned = (decision.output_text or "").strip()
+        return cleaned or text
+
+    def _apply_guardrail_output(self, text: str) -> str:
+        if not self.guardrail_client:
+            return text
+        decision = self.guardrail_client.apply(text=text, source="OUTPUT")
+        cleaned = (decision.output_text or "").strip()
+        return cleaned or text
 
 
 def _safe_json_parse(text: str) -> dict[str, Any]:
