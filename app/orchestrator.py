@@ -119,6 +119,8 @@ class Orchestrator:
         
         if not tool_calls:
             final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
+            if not final_text.strip():
+                final_text = "요청 결과가 비어 있어 표시할 내용이 없습니다."
             elapsed = time.monotonic() - start
             logger.info(
                 "LLM 최종 응답 elapsed=%.2fs",
@@ -229,6 +231,8 @@ class Orchestrator:
             elapsed,
         )
         final_text = self._sanitize_text(final_response.content or "")
+        if not final_text.strip():
+            final_text = self._format_fallback_results(results)
         self._store_chat_history(
             user_id=message.user_id,
             question=message.content,
@@ -747,6 +751,62 @@ class Orchestrator:
         for key in _SENSITIVE_KEYS:
             text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
         return text
+
+    def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
+        if not results:
+            return "요청 결과가 비어 있어 표시할 내용이 없습니다."
+        lines = ["요청 결과를 정리했습니다."]
+        for item in results:
+            tool_name = item.get("tool") or "도구"
+            summary = self._summarize_result(item.get("result"))
+            lines.append(f"{tool_name}: {summary}")
+        return "\n".join(lines)
+
+    def _summarize_result(self, result: Any) -> str:
+        if result is None:
+            return "결과 없음"
+        if isinstance(result, str):
+            trimmed = result.strip()
+            return trimmed or "결과 없음"
+        if isinstance(result, list):
+            if not result:
+                return "목록이 비어 있습니다."
+            if all(isinstance(item, dict) for item in result):
+                items_text = []
+                for idx, item in enumerate(result[:3], start=1):
+                    parts = []
+                    for key, value in list(item.items())[:6]:
+                        parts.append(f"{key}={self._simple_value(value)}")
+                    items_text.append(f"{idx}) " + ", ".join(parts))
+                more = "" if len(result) <= 3 else f" 외 {len(result) - 3}건"
+                return "; ".join(items_text) + more
+            if all(not isinstance(item, (dict, list)) for item in result):
+                preview = ", ".join(str(item) for item in result[:8])
+                more = "" if len(result) <= 8 else f" 외 {len(result) - 8}건"
+                return f"{preview}{more}"
+            return f"목록 {len(result)}건"
+        if isinstance(result, dict):
+            if not result:
+                return "결과 없음"
+            parts = []
+            for key, value in list(result.items())[:8]:
+                parts.append(f"{key}={self._simple_value(value)}")
+            more = "" if len(result) <= 8 else " 외 추가 항목"
+            return ", ".join(parts) + more
+        return str(result)
+
+    def _simple_value(self, value: Any) -> str:
+        if value is None:
+            return "없음"
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, str):
+            return value.strip() or "없음"
+        if isinstance(value, list):
+            return f"목록 {len(value)}건"
+        if isinstance(value, dict):
+            return f"객체 {len(value)}항목"
+        return str(value)
 
     def _needs_plot_packages(self, text: str) -> bool:
         return bool(_PLOT_KEYWORDS_PATTERN.search(text or ""))
