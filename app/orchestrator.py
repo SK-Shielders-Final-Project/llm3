@@ -184,20 +184,27 @@ class Orchestrator:
                     required_packages = self._ensure_packages(required_packages, ["matplotlib"])
 
                 ## 코드 실행
-                sandbox_result = self.sandbox_client.run_code(
-                    code=code,
-                    required_packages=required_packages,
-                    user_id=message.user_id,
-                    run_id=run_id,
-                )
-
-                results.append({"tool": call.name, "result": sandbox_result})
+                try:
+                    sandbox_result = self.sandbox_client.run_code(
+                        code=code,
+                        required_packages=required_packages,
+                        user_id=message.user_id,
+                        run_id=run_id,
+                    )
+                    results.append({"tool": call.name, "result": sandbox_result})
+                except Exception as exc:
+                    logger.exception("Sandbox 실행 실패 tool=%s", call.name)
+                    results.append({"tool": call.name, "error": str(exc)})
                 tools_used.append(call.name)
                 continue
             
-            result = self.registry.execute(call.name, **args)
-            ## 결과 모음
-            results.append({"tool": call.name, "result": self._sanitize_payload(result)})
+            try:
+                result = self.registry.execute(call.name, **args)
+                ## 결과 모음
+                results.append({"tool": call.name, "result": self._sanitize_payload(result)})
+            except Exception as exc:
+                logger.exception("도구 실행 실패 tool=%s", call.name)
+                results.append({"tool": call.name, "error": str(exc)})
             tools_used.append(call.name)
 
         final_user_content = (
