@@ -432,6 +432,13 @@ class Orchestrator:
                 if name:
                     tool_calls.append(SimpleNamespace(name=name, arguments=args))
 
+        content_lines = [line.strip() for line in content.splitlines() if line.strip()]
+        for line in content_lines:
+            if re.match(r"^[a-zA-Z_][\w]*\s*\(.*\)\s*$", line):
+                name, args = self._parse_tool_code_line(line)
+                if name:
+                    tool_calls.append(SimpleNamespace(name=name, arguments=args))
+
         for match in _TOOL_CALL_FENCE_PATTERN.findall(content):
             try:
                 payload = json.loads(match)
