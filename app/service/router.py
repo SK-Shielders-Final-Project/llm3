@@ -5,7 +5,6 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.clients.guardrail_client import build_guardrail_client_from_env
 from app.clients.llm_client import LlmClient, build_http_completion_func
 from app.service.rag import RagPipeline
 from app.service.registry import (
@@ -21,10 +20,7 @@ from app.service.registry import (
 )
 
 router = APIRouter()
-_rag_pipeline = RagPipeline(
-    LlmClient(build_http_completion_func()),
-    guardrail_client=build_guardrail_client_from_env(),
-)
+_rag_pipeline = RagPipeline(LlmClient(build_http_completion_func()))
 
 
 class RagRequest(BaseModel):
