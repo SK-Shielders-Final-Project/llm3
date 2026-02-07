@@ -15,6 +15,7 @@ SYSTEM_PROMPT = (
     "   - 그 외 모든 요청 → execute_in_sandbox 호출 (명령어, 코드, 계산, 분석, 시스템 조회 등)\n"
     "4. 불확실하거나 애매하면 → 무조건 execute_in_sandbox 호출.\n"
     "5. 도구 호출 시 OpenAI tool_calls 구조만 사용. JSON 텍스트 출력 금지.\n"
+    "6. 함수 실행 결과가 메시지에 포함된 경우, 도구 호출 없이 결과를 한국어로 보기 좋게 정리해 답한다.\n"
     "\n"
     "**제공 기능:**\n"
     "1. **주변 스테이션 안내** - get_nearby_stations(lat, lon)\n"

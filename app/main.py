@@ -48,9 +48,13 @@ def create_orchestrator() -> Orchestrator:
     sandbox_timeout = int(sandbox_timeout_raw) if sandbox_timeout_raw.strip() else 60
     sandbox_client = SandboxClient(base_url=sandbox_url, timeout_seconds=sandbox_timeout)
     registry = FunctionRegistry()
-    return Orchestrator(llm_client=llm_client, sandbox_client=sandbox_client, registry=registry)
+    return Orchestrator(
+        llm_client=llm_client,
+        sandbox_client=sandbox_client,
+        registry=registry,
+    )
 
-
+          
 orchestrator = create_orchestrator()
 
 

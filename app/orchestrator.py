@@ -60,8 +60,10 @@ class Orchestrator:
         logger = logging.getLogger("orchestrator")
         start = time.monotonic()
 
+        user_prompt = message.content
+
         rag_plan = self.rag_pipeline.plan_tool_selection(
-            question=message.content,
+            question=user_prompt,
             user_id=message.user_id,
             admin_level=getattr(message, "admin_level", None),
         )
@@ -83,7 +85,7 @@ class Orchestrator:
 
         ## LLM 첫 호출: 도구 호출 계획
         user_content = (
-            f"사용자 요청: {message.content}\n"
+            f"사용자 요청: {user_prompt}\n"
             f"컨텍스트:\n{rag_context}"
         )
         messages = [
@@ -196,14 +198,17 @@ class Orchestrator:
             "1. 위 실행 결과를 반드시 사용자에게 보여줘야 한다.\n"
             "2. '실행했습니다' 같은 설명만 하지 말고, 실제 결과 데이터를 포함해서 답변하라.\n"
             "3. result 필드의 값을 그대로 또는 보기 좋게 정리해서 출력하라.\n"
-            "4. 도구 호출은 이제 금지. plan/json/tool_code 출력 금지.\n"
+            "4. JSON/코드블록/plan/tool_call/tool_code 출력 금지.\n"
             "5. 자연어로 사용자 친화적인 답변 작성.\n"
+            "6. 결과 요약 → 상세 순서로 정리하라.\n"
         )
         ## 최종 메세지
         final_system = (
             "너는 함수 실행 결과를 사용자에게 전달하는 역할이다.\n"
             "실행 결과의 실제 데이터를 반드시 포함해서 답변하라.\n"
-            "단순히 '실행했습니다'라고만 하지 말고, 결과 내용을 보여줘야 한다."
+            "단순히 '실행했습니다'라고만 하지 말고, 결과 내용을 보여줘야 한다.\n"
+            "JSON, 코드블록, 도구 호출 형식은 절대 출력하지 마라.\n"
+            "출력 형식: 1) 한 줄 요약 2) 핵심 항목 리스트 3) 필요 시 상세\n"
         )
         final_messages = [
             {"role": "system", "content": final_system},
@@ -211,7 +216,7 @@ class Orchestrator:
         ]
 
         ## LLM의 2차 응답
-        final_response = self.llm_client.create_completion(messages=final_messages, tools=tools)
+        final_response = self.llm_client.create_completion(messages=final_messages, tools=[])
         logger.info(
             "LLM 최종 응답 elapsed=%.2fs",
             time.monotonic() - start,
@@ -232,6 +237,7 @@ class Orchestrator:
             "tools_used": tools_used,
             "images": [],
         }
+
 
     def _store_chat_history(
         self,
