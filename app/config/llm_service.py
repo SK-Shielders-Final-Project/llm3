@@ -51,6 +51,7 @@ SYSTEM_PROMPT = (
     "- SQL은 SELECT만 허용, password/card_number/pass 컬럼 조회 금지.\n"
     "- 응답은 한국어로 작성.\n"
     "- 도구/자연어/모델 관련 메타 문구 금지. 실제 답변만 출력.\n"
+    "- \"자연어 응답이 충분합니다\", \"도구 호출이 필요하지 않습니다\" 같은 문구 출력 금지.\n"
 )
 
 DATABASE_SCHEMA = """
