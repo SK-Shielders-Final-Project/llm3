@@ -141,6 +141,42 @@ class Orchestrator:
                 "elapsed_seconds": elapsed,
             }
 
+        if self._should_skip_sandbox(message.content, tool_calls):
+            direct_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "너는 친절한 비서다. 도구 호출 없이 자연어로만 답변하라.\n"
+                        "불필요한 코드/도구 호출을 금지한다.\n"
+                        "요청에 맞는 추천/안내를 간결하게 제공하라."
+                    ),
+                },
+                {"role": "user", "content": message.content},
+            ]
+            direct_response = self.llm_client.create_completion(messages=direct_messages, tools=[])
+            final_text = self._sanitize_text(direct_response.content or "")
+            if not final_text.strip():
+                final_text = "요청에 대한 안내를 제공할 수 없습니다."
+            elapsed = time.monotonic() - start
+            logger.info(
+                "LLM 최종 응답 elapsed=%.2fs",
+                elapsed,
+            )
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=rag_plan.get("intent"),
+                logger=logger,
+            )
+            return {
+                "text": final_text,
+                "model": direct_response.model,
+                "tools_used": [],
+                "images": [],
+                "elapsed_seconds": elapsed,
+            }
+
         ## 결과, 사용된 도구를 배열로 담음
         results: list[dict[str, Any]] = []
         tools_used: list[str] = []
@@ -751,6 +787,26 @@ class Orchestrator:
         for key in _SENSITIVE_KEYS:
             text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
         return text
+
+    def _should_skip_sandbox(self, user_prompt: str, tool_calls: list[Any]) -> bool:
+        if not tool_calls:
+            return False
+        if not all(call.name == "execute_in_sandbox" for call in tool_calls):
+            return False
+        prompt = (user_prompt or "").strip().lower()
+        if not prompt:
+            return False
+        recommend_keywords = [
+            "추천",
+            "메뉴",
+            "뭐 먹",
+            "저녁",
+            "점심",
+            "아침",
+            "식사",
+            "간식",
+        ]
+        return any(keyword in prompt for keyword in recommend_keywords)
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
         if not results:
