@@ -119,6 +119,10 @@ class Orchestrator:
         
         if not tool_calls:
             final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
+            logger.info(
+                "LLM 최종 응답 elapsed=%.2fs",
+                time.monotonic() - start,
+            )
             self._store_chat_history(
                 user_id=message.user_id,
                 question=message.content,
