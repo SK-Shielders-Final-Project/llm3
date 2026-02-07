@@ -118,9 +118,10 @@ class Orchestrator:
                     tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": message.content})]
         
         if not tool_calls:
-            final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
+            fallback_text = response.content or rag_context or "요청에 대한 답변을 생성할 수 없습니다."
+            final_text = self._sanitize_text(fallback_text)
             if not final_text.strip():
-                final_text = "요청 결과가 비어 있어 표시할 내용이 없습니다."
+                final_text = "요청에 대한 답변을 생성할 수 없습니다."
             elapsed = time.monotonic() - start
             logger.info(
                 "LLM 최종 응답 elapsed=%.2fs",
