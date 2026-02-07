@@ -162,11 +162,12 @@ def build_system_context(message: LlmMessage) -> str:
     max_tokens = _get_system_prompt_max_tokens()
     prompt = _truncate_by_tokens(SYSTEM_PROMPT, max_tokens)
     tool_names = ", ".join(_get_tool_names())
+    include_schema = os.getenv("INCLUDE_DB_SCHEMA", "").strip().lower() in {"1", "true", "yes"}
+    schema_block = f"DB Schema:\n{DATABASE_SCHEMA}\n" if include_schema else ""
     return (
         f"{prompt}\n"
         f"Available tools: {tool_names}\n"
-        "DB Schema:\n"
-        f"{DATABASE_SCHEMA}\n"
+        f"{schema_block}"
         "사용자 정보 조회는 get_user_profile, "
         "자전거 이용 내역은 get_rentals, "
         "총 결제 내역은 get_total_payments, "

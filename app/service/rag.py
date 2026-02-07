@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
@@ -440,12 +441,23 @@ class RagPipeline:
         mysql_data: dict[str, Any] | None,
     ) -> str:
         context_parts: list[str] = []
+        doc_limit_raw = os.getenv("RAG_CONTEXT_DOCS", "2").strip()
+        snippet_limit_raw = os.getenv("RAG_CONTEXT_SNIPPET_CHARS", "200").strip()
+        try:
+            doc_limit = max(1, min(int(doc_limit_raw), 5))
+        except ValueError:
+            doc_limit = 2
+        try:
+            snippet_limit = max(80, min(int(snippet_limit_raw), 500))
+        except ValueError:
+            snippet_limit = 200
+
         if docs:
             context_parts.append("=== 관련 문서 ===")
-            for idx, doc in enumerate(docs[:3], 1):
+            for idx, doc in enumerate(docs[:doc_limit], 1):
                 snippet = (doc.get("content") or "").strip()
-                if len(snippet) > 300:
-                    snippet = snippet[:300] + "..."
+                if len(snippet) > snippet_limit:
+                    snippet = snippet[:snippet_limit] + "..."
                 context_parts.append(f"{idx}. {snippet}")
             context_parts.append("")
 
