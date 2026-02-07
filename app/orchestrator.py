@@ -730,6 +730,20 @@ class Orchestrator:
         return payload
 
     def _sanitize_text(self, text: str) -> str:
+        if not text:
+            return text
+        text = re.sub(
+            r"```tool_call\s*[\s\S]*?```",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"```tool_code\s*[\s\S]*?```",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
         for key in _SENSITIVE_KEYS:
             text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
         return text
