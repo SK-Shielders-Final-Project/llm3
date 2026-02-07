@@ -119,6 +119,11 @@ class Orchestrator:
         
         if not tool_calls:
             final_text = self._sanitize_text(response.content or "기능 목록을 제공할 수 없습니다.")
+            elapsed = time.monotonic() - start
+            logger.info(
+                "LLM 최종 응답 elapsed=%.2fs",
+                elapsed,
+            )
             self._store_chat_history(
                 user_id=message.user_id,
                 question=message.content,
@@ -131,6 +136,7 @@ class Orchestrator:
                 "model": response.model,
                 "tools_used": [],
                 "images": [],
+                "elapsed_seconds": elapsed,
             }
 
         ## 결과, 사용된 도구를 배열로 담음
@@ -217,9 +223,10 @@ class Orchestrator:
 
         ## LLM의 2차 응답
         final_response = self.llm_client.create_completion(messages=final_messages, tools=[])
+        elapsed = time.monotonic() - start
         logger.info(
             "LLM 최종 응답 elapsed=%.2fs",
-            time.monotonic() - start,
+            elapsed,
         )
         final_text = self._sanitize_text(final_response.content or "")
         self._store_chat_history(
@@ -236,6 +243,7 @@ class Orchestrator:
             "model": final_response.model,
             "tools_used": tools_used,
             "images": [],
+            "elapsed_seconds": elapsed,
         }
 
 
