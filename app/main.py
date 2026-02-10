@@ -127,8 +127,9 @@ def _handle_with_worker_and_memory_guard(message: LlmMessage) -> dict[str, Any] 
     limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "1024")
     interval_raw = os.getenv("UNBOUNDED_MEMORY_CHECK_INTERVAL_SECONDS", "0.5")
     max_wall_raw = os.getenv("UNBOUNDED_REQUEST_MAX_SECONDS", "180")
-    sample_interval_raw = os.getenv("UNBOUNDED_MEMORY_SAMPLE_INTERVAL_SECONDS", "5")
-    samples_max_raw = os.getenv("UNBOUNDED_MEMORY_SAMPLES_MAX", "30")
+    # 기본값은 "수집 안 함" (정상 응답에 메모리 로그를 섞지 않기 위함)
+    sample_interval_raw = os.getenv("UNBOUNDED_MEMORY_SAMPLE_INTERVAL_SECONDS", "0")
+    samples_max_raw = os.getenv("UNBOUNDED_MEMORY_SAMPLES_MAX", "0")
 
     try:
         limit_mb = int(limit_mb_raw.strip())
@@ -302,7 +303,9 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     start = time.monotonic()
     try:
         vulnerable_unbounded = _env_true("VULNERABLE_UNBOUNDED_CONSUMPTION", "false")
-        include_samples_in_text = _env_true("UNBOUNDED_INCLUDE_MEMORY_SAMPLES_IN_TEXT", "true")
+        # 정상 응답에서는 메모리 샘플을 client에 내보내지 않는다.
+        # (필요 시에만 env로 명시적으로 켠다)
+        include_samples_in_text = _env_true("UNBOUNDED_INCLUDE_MEMORY_SAMPLES_IN_TEXT", "false")
         if vulnerable_unbounded:
             guarded = _handle_with_worker_and_memory_guard(message)
             if isinstance(guarded, dict) and guarded.get("_memory_exceeded") is True:
@@ -344,6 +347,7 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     text = result.get("text", "")
     samples = result.get("_memory_samples") if isinstance(result, dict) else None
     if include_samples_in_text and isinstance(samples, list) and samples:
+        # 디버그 용도로만 사용 (기본 OFF)
         lines = ["", "[메모리 사용량 로그(샘플)]"]
         for s in samples[-30:]:
             t = s.get("t")
