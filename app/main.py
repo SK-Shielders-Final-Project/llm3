@@ -90,7 +90,14 @@ def generate(request: GenerateRequest) -> GenerateResponse:
     try:
         result = orchestrator.handle_user_request(message)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        import traceback
+        error_detail = f"{type(exc).__name__}: {str(exc)}"
+        logging.getLogger("main").error(
+            "요청 처리 실패: %s\n%s",
+            error_detail,
+            traceback.format_exc()
+        )
+        raise HTTPException(status_code=500, detail=error_detail) from exc
     return GenerateResponse(
         text=result.get("text", ""),
         model=result.get("model", "unknown"),

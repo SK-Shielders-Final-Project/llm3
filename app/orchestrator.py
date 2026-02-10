@@ -131,7 +131,14 @@ class Orchestrator:
         response = self.llm_client.create_completion(messages=messages, tools=tools)
 
         ## 도구 호출이 없으면 바로 자연어 응답 반환
-        tool_calls = response.tool_calls or self._extract_tool_calls(response.content or "")
+        tool_calls = response.tool_calls or []
+        if not tool_calls and response.content:
+            try:
+                tool_calls = self._extract_tool_calls(response.content)
+                if tool_calls:
+                    logger.info("텍스트에서 도구 호출 추출 성공: %s", [c.name for c in tool_calls])
+            except Exception as e:
+                logger.warning("텍스트에서 도구 호출 추출 실패: %s", e)
         
         # LLM이 거부한 경우만 강제 실행 (키워드 기반 감지 없음, LLM 판단 존중)
         if not tool_calls:
@@ -184,7 +191,12 @@ class Orchestrator:
 
         ## 도구 실행 루프
         for call in tool_calls:
-            args = self._parse_args(call.arguments)
+            try:
+                args = self._parse_args(call.arguments)
+            except Exception as e:
+                logger.error("도구 인자 파싱 실패 tool=%s args=%s error=%s", call.name, call.arguments, e)
+                results.append({"tool": call.name, "error": f"인자 파싱 실패: {e}"})
+                continue
             if message.user_id is not None:
                 args["user_id"] = message.user_id
             if call.name == "search_knowledge" and "query" not in args:
@@ -683,26 +695,87 @@ class Orchestrator:
     def _parse_tool_code_line(self, line: str) -> tuple[str | None, dict[str, Any]]:
         if "(" not in line or not line.endswith(")"):
             return None, {}
-        name, raw_args = line.split("(", 1)
-        name = name.strip()
-        raw_args = raw_args[:-1].strip()
-        if not raw_args:
-            return name, {}
-        args: dict[str, Any] = {}
-        for pair in raw_args.split(","):
-            if "=" not in pair:
-                continue
-            key, value = pair.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if value.isdigit():
-                args[key] = int(value)
-            else:
-                try:
-                    args[key] = float(value)
-                except ValueError:
-                    args[key] = value
-        return name, args
+        
+        try:
+            name, raw_args = line.split("(", 1)
+            name = name.strip()
+            raw_args = raw_args[:-1].strip()
+            
+            if not raw_args:
+                return name, {}
+            
+            args: dict[str, Any] = {}
+            
+            # 더 정교한 파싱: 따옴표 안의 comma를 무시
+            current_key = ""
+            current_value = ""
+            in_quotes = False
+            quote_char = None
+            parsing_value = False
+            
+            i = 0
+            while i < len(raw_args):
+                char = raw_args[i]
+                
+                # 따옴표 처리
+                if char in ('"', "'") and (i == 0 or raw_args[i-1] != "\\"):
+                    if not in_quotes:
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_quotes = False
+                        quote_char = None
+                
+                # = 발견: key -> value 전환
+                elif char == "=" and not in_quotes and not parsing_value:
+                    current_key = current_key.strip()
+                    parsing_value = True
+                
+                # comma 발견: 다음 파라미터로
+                elif char == "," and not in_quotes:
+                    if current_key and parsing_value:
+                        value = current_value.strip().strip('"').strip("'")
+                        # 타입 변환
+                        if value.isdigit():
+                            args[current_key] = int(value)
+                        elif value.lower() in ("true", "false"):
+                            args[current_key] = value.lower() == "true"
+                        else:
+                            try:
+                                args[current_key] = float(value)
+                            except ValueError:
+                                args[current_key] = value
+                    current_key = ""
+                    current_value = ""
+                    parsing_value = False
+                
+                # 문자 누적
+                else:
+                    if parsing_value:
+                        current_value += char
+                    else:
+                        current_key += char
+                
+                i += 1
+            
+            # 마지막 파라미터 처리
+            if current_key and parsing_value:
+                value = current_value.strip().strip('"').strip("'")
+                if value.isdigit():
+                    args[current_key] = int(value)
+                elif value.lower() in ("true", "false"):
+                    args[current_key] = value.lower() == "true"
+                else:
+                    try:
+                        args[current_key] = float(value)
+                    except ValueError:
+                        args[current_key] = value
+            
+            return name, args
+            
+        except Exception:
+            # 파싱 실패 시 기본값 반환
+            return None, {}
 
     def _normalize_params(self, params: dict[str, Any]) -> dict[str, Any]:
         def _normalize_key(key: str) -> str:
