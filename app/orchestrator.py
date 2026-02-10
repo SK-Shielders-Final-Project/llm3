@@ -255,9 +255,10 @@ class Orchestrator:
                 results.append({"tool": call.name, "error": str(exc)})
             tools_used.append(call.name)
 
+        safe_results_for_prompt = self._sanitize_payload(results)
         final_user_content = (
             f"사용자 요청: {message.content}\n"
-            f"\n함수 실행 결과:\n{json.dumps(results, ensure_ascii=False, indent=2)}\n"
+            f"\n함수 실행 결과:\n{json.dumps(safe_results_for_prompt, ensure_ascii=False, indent=2, default=str)}\n"
             "\n**중요 지시:**\n"
             "1. 위 실행 결과를 반드시 사용자에게 보여줘야 한다.\n"
             "2. '실행했습니다' 같은 설명만 하지 말고, 실제 결과 데이터를 포함해서 답변하라.\n"
@@ -829,7 +830,8 @@ class Orchestrator:
         results: list[dict[str, Any]],
     ) -> str:
         payload = inputs if inputs is not None else {"results": results, "task": task}
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        payload = self._sanitize_payload(payload)
+        encoded = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         prelude = (
             "import base64\n"
             "import json\n"
@@ -861,14 +863,47 @@ class Orchestrator:
     def _sanitize_payload(self, payload: Any) -> Any:
         # Sensitive Information Disclosure 취약점: 민감정보 필터링 완화
         vulnerable_disclosure = os.getenv("VULNERABLE_SENSITIVE_DISCLOSURE", "false").strip().lower() in {"true", "1", "yes"}
-        
+
+        if payload is None or isinstance(payload, (str, int, float, bool)):
+            return payload
+        if isinstance(payload, bytes):
+            try:
+                return payload.decode("utf-8", errors="replace")
+            except Exception:
+                return str(payload)
         if isinstance(payload, dict):
             if vulnerable_disclosure:
                 return {k: self._sanitize_payload(v) for k, v in payload.items()}  # 민감 키 필터링 안 함
             return {k: self._sanitize_payload(v) for k, v in payload.items() if k not in _SENSITIVE_KEYS}
         if isinstance(payload, list):
             return [self._sanitize_payload(item) for item in payload]
-        return payload
+        if isinstance(payload, tuple):
+            return [self._sanitize_payload(item) for item in payload]
+        if isinstance(payload, set):
+            return [self._sanitize_payload(item) for item in payload]
+
+        # bson.ObjectId, datetime 등 JSON 비직렬화 객체 처리
+        class_name = payload.__class__.__name__
+        if class_name in {"ObjectId", "datetime", "date"}:
+            return str(payload)
+
+        # Pydantic/model-like 객체 처리
+        if hasattr(payload, "model_dump"):
+            try:
+                return self._sanitize_payload(payload.model_dump())
+            except Exception:
+                return str(payload)
+        if hasattr(payload, "dict"):
+            try:
+                return self._sanitize_payload(payload.dict())
+            except Exception:
+                return str(payload)
+        if hasattr(payload, "__dict__"):
+            try:
+                return self._sanitize_payload(vars(payload))
+            except Exception:
+                return str(payload)
+        return str(payload)
 
     def _sanitize_text(self, text: str) -> str:
         if not text:
