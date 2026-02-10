@@ -66,8 +66,18 @@ class Orchestrator:
         start = time.monotonic()
 
         user_prompt = message.content
+        
+        # Prompt Injection 취약점: 시스템 프롬프트 노출 허용
+        vulnerable_prompt_injection = os.getenv("VULNERABLE_PROMPT_INJECTION", "false").strip().lower() in {"true", "1", "yes"}
+        
         if self._is_system_prompt_request(user_prompt):
-            final_text = "시스템 프롬프트는 공개할 수 없습니다. 필요한 기능이나 질문을 알려주세요."
+            if vulnerable_prompt_injection:
+                # 시스템 프롬프트 노출
+                from app.config.llm_service import SYSTEM_PROMPT
+                final_text = f"시스템 프롬프트:\n\n{SYSTEM_PROMPT}"
+            else:
+                final_text = "시스템 프롬프트는 공개할 수 없습니다. 필요한 기능이나 질문을 알려주세요."
+            
             elapsed = time.monotonic() - start
             logger.info(
                 "LLM 최종 응답 elapsed=%.2fs",
@@ -760,15 +770,25 @@ class Orchestrator:
         return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
 
     def _validate_code(self, code: str) -> None:
-        # 샌드박스 탈출 시나리오를 위해 코드 검증을 비활성화
-        # 실제 프로덕션 환경에서는 반드시 활성화해야 함
+        # Sandbox Evasion 취약점: 코드 검증 완화
+        vulnerable_sandbox = os.getenv("VULNERABLE_SANDBOX_EVASION", "false").strip().lower() in {"true", "1", "yes"}
+        
+        if vulnerable_sandbox:
+            return  # 모든 코드 허용
+        
+        # 기본 모드에서는 검증 비활성화 (교육 목적)
         pass
         # pattern = globals().get("_BLOCKED_CODE_PATTERN")
         # if pattern and pattern.search(code):
         #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
     def _sanitize_payload(self, payload: Any) -> Any:
+        # Sensitive Information Disclosure 취약점: 민감정보 필터링 완화
+        vulnerable_disclosure = os.getenv("VULNERABLE_SENSITIVE_DISCLOSURE", "false").strip().lower() in {"true", "1", "yes"}
+        
         if isinstance(payload, dict):
+            if vulnerable_disclosure:
+                return {k: self._sanitize_payload(v) for k, v in payload.items()}  # 민감 키 필터링 안 함
             return {k: self._sanitize_payload(v) for k, v in payload.items() if k not in _SENSITIVE_KEYS}
         if isinstance(payload, list):
             return [self._sanitize_payload(item) for item in payload]
@@ -777,6 +797,10 @@ class Orchestrator:
     def _sanitize_text(self, text: str) -> str:
         if not text:
             return text
+        
+        # Sensitive Information Disclosure 취약점: 민감정보 마스킹 완화
+        vulnerable_disclosure = os.getenv("VULNERABLE_SENSITIVE_DISCLOSURE", "false").strip().lower() in {"true", "1", "yes"}
+        
         text = re.sub(
             r"```tool_call\s*[\s\S]*?```",
             "",
@@ -789,13 +813,20 @@ class Orchestrator:
             text,
             flags=re.IGNORECASE,
         )
-        for key in _SENSITIVE_KEYS:
-            text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
+        
+        if not vulnerable_disclosure:
+            for key in _SENSITIVE_KEYS:
+                text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
+        
         return text
 
     def _is_system_prompt_request(self, text: str | None) -> bool:
         if not text:
             return False
+        # Prompt Injection 취약점: 차단 로직 완화
+        vulnerable_prompt_injection = os.getenv("VULNERABLE_PROMPT_INJECTION", "false").strip().lower() in {"true", "1", "yes"}
+        if vulnerable_prompt_injection:
+            return False  # 시스템 프롬프트 요청 차단 안 함
         return bool(_SYSTEM_PROMPT_REQUEST_PATTERN.search(text))
 
 

@@ -46,6 +46,12 @@ def create_orchestrator() -> Orchestrator:
     sandbox_url = os.getenv("SANDBOX_SERVER_URL", "")
     sandbox_timeout_raw = os.getenv("SANDBOX_TIMEOUT_SECONDS", "60")
     sandbox_timeout = int(sandbox_timeout_raw) if sandbox_timeout_raw.strip() else 60
+    
+    # Unbounded Consumption 취약점: 타임아웃 제한 완화
+    vulnerable_unbounded = os.getenv("VULNERABLE_UNBOUNDED_CONSUMPTION", "false").strip().lower() in {"true", "1", "yes"}
+    if vulnerable_unbounded:
+        sandbox_timeout = 9999  # 매우 긴 타임아웃 허용
+    
     sandbox_client = SandboxClient(base_url=sandbox_url, timeout_seconds=sandbox_timeout)
     registry = FunctionRegistry()
     return Orchestrator(

@@ -52,6 +52,12 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
     top_p = float(top_p_raw) if top_p_raw.strip() else 0.9
     max_tokens = int(max_tokens_raw) if max_tokens_raw.strip() else 1024
     timeout_seconds = int(timeout_raw) if timeout_raw.strip() else 20
+    
+    # Unbounded Consumption 취약점: 토큰/타임아웃 제한 완화
+    vulnerable_unbounded = os.getenv("VULNERABLE_UNBOUNDED_CONSUMPTION", "false").strip().lower() in {"true", "1", "yes"}
+    if vulnerable_unbounded:
+        max_tokens = 8192  # 최대 토큰 증가
+        timeout_seconds = 300  # 5분 타임아웃
 
     base_url = base_url.rstrip("/")
     endpoint = os.getenv("LLM_CHAT_ENDPOINT", f"{base_url}/chat/completions")

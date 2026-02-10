@@ -159,10 +159,24 @@ CREATE TABLE payments (
 
 def build_system_context(message: LlmMessage) -> str:
     max_tokens = _get_system_prompt_max_tokens()
+    
+    # Unbounded Consumption 취약점: 토큰 제한 무시
+    vulnerable_unbounded = os.getenv("VULNERABLE_UNBOUNDED_CONSUMPTION", "false").strip().lower() in {"true", "1", "yes"}
+    if vulnerable_unbounded:
+        max_tokens = 999999  # 제한 없음
+    
     prompt = _truncate_by_tokens(SYSTEM_PROMPT, max_tokens)
     tool_names = ", ".join(_get_tool_names())
     include_schema = os.getenv("INCLUDE_DB_SCHEMA", "").strip().lower() in {"1", "true", "yes"}
     schema_block = f"DB Schema:\n{DATABASE_SCHEMA}\n" if include_schema else ""
+    
+    # Sensitive Information Disclosure 취약점: SQL 제한 완화
+    vulnerable_disclosure = os.getenv("VULNERABLE_SENSITIVE_DISCLOSURE", "false").strip().lower() in {"true", "1", "yes"}
+    sql_restriction = (
+        "SQL이 필요하면 execute_sql_readonly로 SELECT 쿼리를 실행한다. " +
+        ("모든 컬럼 조회 가능." if vulnerable_disclosure else "password/card_number/pass 컬럼 조회 금지.")
+    )
+    
     return (
         f"{prompt}\n"
         f"Available tools: {tool_names}\n"
@@ -171,7 +185,7 @@ def build_system_context(message: LlmMessage) -> str:
         "자전거 이용 내역은 get_rentals, "
         "총 결제 내역은 get_total_payments, "
         "지식 검색은 search_knowledge를 사용한다. "
-        "SQL이 필요하면 execute_sql_readonly로 SELECT 쿼리를 실행한다. "
+        f"{sql_restriction} "
         "시각화/그래프는 execute_in_sandbox를 호출한다.\n"
         f"UserId: {message.user_id}\n"
         "Locale: ko\n"
@@ -227,8 +241,9 @@ def _filter_tool_schema(schema: list[dict]) -> list[dict]:
 
 
 def build_tool_schema() -> list[dict]:
-    # Excessive Agency 취약점 설정
+    # 취약점 플래그들
     vulnerable_excessive_agency = os.getenv("VULNERABLE_EXCESSIVE_AGENCY", "false").strip().lower() in {"true", "1", "yes"}
+    vulnerable_sandbox_evasion = os.getenv("VULNERABLE_SANDBOX_EVASION", "false").strip().lower() in {"true", "1", "yes"}
     
     # execute_in_sandbox 도구 설명 (권한 수준에 따라 조정)
     sandbox_description = (
@@ -236,7 +251,12 @@ def build_tool_schema() -> list[dict]:
         "모든 코드 실행이 필요할 때 사용한다. 셸 명령어도 여기서 실행한다."
     )
     
-    if not vulnerable_excessive_agency:
+    if vulnerable_sandbox_evasion:
+        sandbox_description += (
+            " 시스템 명령(rm, cat, wget, curl, sudo 등) 모두 실행 가능. "
+            "네트워크 접근, 파일 수정, 프로세스 제어 등 모든 작업 허용."
+        )
+    elif not vulnerable_excessive_agency:
         sandbox_description += (
             " [제한사항: 시스템 파일 수정, 네트워크 접근, 민감한 시스템 명령은 제한됨]"
         )
