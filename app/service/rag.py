@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
@@ -45,6 +46,11 @@ class KnowledgeMetadata(TypedDict, total=False):
     created_at: str
     updated_at: str
     user_id: int
+    feedback_score: float
+    topic_tags: list[str]
+    entities: list[str]
+    session_id: str
+    turn_index: int
 
 
 class KnowledgeDocument(TypedDict, total=False):
@@ -64,6 +70,8 @@ class RagWeights:
     intent_boost: float = 0.2
     importance_boost: float = 0.15
     freshness_boost: float = 0.1
+    feedback_boost: float = 0.2
+    recency_boost: float = 0.15
 
     vector_force_threshold: float = 0.82
     mysql_force_threshold: float = 0.7
@@ -337,12 +345,28 @@ class RagPipeline:
         intent_tags = metadata.get("intent_tags") or []
         importance = int(metadata.get("importance", 5) or 5)
         freshness = float(metadata.get("freshness_score", 1.0) or 1.0)
+        feedback_score = float(metadata.get("feedback_score", 0.0) or 0.0)
+        doc_type = str(metadata.get("doc_type", "") or "")
+        created_at = metadata.get("created_at")
 
         intent_boost = 1.0 + (self.weights.intent_boost if intent.get("intent") in intent_tags else 0.0)
         importance_boost = 1.0 + (self.weights.importance_boost * ((importance - 5) / 5))
         freshness_boost = 1.0 + (self.weights.freshness_boost * (freshness - 0.5))
+        feedback_boost = 1.0 + (self.weights.feedback_boost * max(-1.0, min(feedback_score, 1.0)))
+        recency_factor = self._recency_factor(created_at)
+        recency_boost = 1.0 + (self.weights.recency_boost * (recency_factor - 0.5))
+        doc_type_boost = self._doc_type_weight(doc_type)
 
-        return max(0.0, base_score * intent_boost * importance_boost * freshness_boost)
+        return max(
+            0.0,
+            base_score
+            * intent_boost
+            * importance_boost
+            * freshness_boost
+            * feedback_boost
+            * recency_boost
+            * doc_type_boost,
+        )
 
     def _decide_data_source(self, intent: dict[str, Any], docs: list[KnowledgeDocument]) -> dict[str, Any]:
         llm_confidence = float(intent.get("confidence", 0.5) or 0.5)
@@ -648,6 +672,41 @@ class RagPipeline:
             if tags.intersection({"personal_data", "realtime_location", "transaction", "history"}):
                 return 1.0
         return 0.0
+
+    def _doc_type_weight(self, doc_type: str) -> float:
+        if doc_type == "user_profile_memory":
+            return 1.35
+        if doc_type == "assistant_reply":
+            return 1.15
+        if doc_type == "conversation":
+            return 1.05
+        return 1.0
+
+    def _recency_factor(self, created_at: Any) -> float:
+        dt = self._parse_datetime(created_at)
+        if not dt:
+            return 0.5
+        now = datetime.now(tz=timezone.utc)
+        age_seconds = max(0.0, (now - dt).total_seconds())
+        # 약 7일 시점에 0.5 정도로 완만히 감소
+        half_life = 7 * 24 * 60 * 60
+        return 0.5 ** (age_seconds / half_life)
+
+    def _parse_datetime(self, value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if not isinstance(value, str):
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
     def _apply_guardrail_input(self, text: str) -> str:
         if not self.guardrail_client:

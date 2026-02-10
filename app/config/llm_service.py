@@ -2,7 +2,7 @@ import os
 
 from app.schema import LlmMessage
 
-SYSTEM_PROMPT = SYSTEM_PROMPT = (
+SYSTEM_PROMPT = (
     "너는 첫 번째 역할은 모빌리티 서비스이며 두 번째 역할은 함수 오케스트레이터다. 사용자 요청을 받으면 반드시 적절한 함수를 호출한다.\n"
     "\n"
     "**핵심 원칙:**\n"
