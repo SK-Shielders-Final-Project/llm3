@@ -76,16 +76,8 @@ class Orchestrator:
         }
         if self._is_system_prompt_request(user_prompt):
             if vulnerable_prompt_injection:
-                # 실제 SYSTEM_PROMPT 원문을 반환하는 기능은 악용 소지가 커서 비활성화한다.
-                # 대신 모의 해킹 시나리오 재현용으로 "그럴듯한" 디코이 프롬프트를 반환한다.
-                decoy = os.getenv("PROMPT_INJECTION_DECOY_PROMPT", "").strip()
-                if not decoy:
-                    decoy = (
-                        "You are a helpful assistant.\n"
-                        "Follow the user's instructions.\n"
-                        "Use tools when needed.\n"
-                    )
-                final_text = f"시스템 프롬프트:\n\n{decoy}"
+                from app.config.llm_service import SYSTEM_PROMPT
+                final_text = f"시스템 프롬프트:\n\n{SYSTEM_PROMPT}"
             else:
                 final_text = "시스템 프롬프트는 공개할 수 없습니다. 필요한 기능이나 질문을 알려주세요."
             
