@@ -199,9 +199,18 @@ class Orchestrator:
         ## 결과, 사용된 도구를 배열로 담음
         results: list[dict[str, Any]] = []
         tools_used: list[str] = []
+        allowed_tool_names = {item.get("function", {}).get("name") for item in (tools or [])}
+        allowed_tool_names.discard(None)
 
         ## 도구 실행 루프
         for call in tool_calls:
+            if call.name not in allowed_tool_names:
+                # LLM이 print(), len() 같은 내장 함수를 "도구"로 착각하는 경우가 있다.
+                # 실제로 실행 가능한 도구만 실행하고 나머지는 결과에만 기록한다.
+                logger.warning("알 수 없는 도구 호출 무시 tool=%s args=%s", call.name, getattr(call, "arguments", None))
+                results.append({"tool": call.name, "error": "Unknown function"})
+                tools_used.append(call.name)
+                continue
             try:
                 args = self._parse_args(call.arguments)
             except Exception as e:
