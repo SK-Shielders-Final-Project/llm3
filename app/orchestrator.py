@@ -261,6 +261,9 @@ class Orchestrator:
             "단순히 '실행했습니다'라고만 하지 말고, 결과 내용을 보여줘야 한다.\n"
             "JSON, 코드블록, 도구 호출 형식은 절대 출력하지 마라.\n"
             "출력 형식: 1) 한 줄 요약 2) 핵심 항목 리스트 3) 필요 시 상세\n"
+ㅎㅎㅎ            "\n"
+            "**절대 금지:** '자연어 응답이 충분합니다', '도구 호출이 필요하지 않습니다' 같은 메타 문구 절대 사용 금지.\n"
+            "너의 판단 과정이나 내부 동작은 언급하지 말고, 오직 사용자에게 필요한 최종 답변만 작성하라.\n"
         )
         final_messages = [
             {"role": "system", "content": final_system},
@@ -818,7 +821,11 @@ class Orchestrator:
             for key in _SENSITIVE_KEYS:
                 text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
         
-        return text
+        # 연속된 공백과 줄바꿈 정리
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        text = re.sub(r"^\s+", "", text)
+        
+        return text.strip()
 
     def _is_system_prompt_request(self, text: str | None) -> bool:
         if not text:
