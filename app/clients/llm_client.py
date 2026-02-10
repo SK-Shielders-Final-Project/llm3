@@ -57,12 +57,22 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
     endpoint = os.getenv("LLM_CHAT_ENDPOINT", f"{base_url}/chat/completions")
     api_key = os.getenv("LLM_API_KEY")
     logger = logging.getLogger("llm_client")
+    use_gemma_message_adapter = os.getenv("USE_GEMMA_MESSAGE_ADAPTER", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
     def _completion(messages: list[dict], tools: list[dict]) -> Any:
         start = time.monotonic()
+        prepared_messages = _prepare_messages_for_request(
+            messages=messages,
+            model=model,
+            use_gemma_adapter=use_gemma_message_adapter,
+        )
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": prepared_messages,
             "tools": tools,
             "tool_choice": "auto",
             "temperature": temperature,
@@ -70,7 +80,7 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             "max_tokens": max_tokens,
             "stream": False,
         }
-        safe_messages = _sanitize_messages(messages)
+        safe_messages = _sanitize_messages(prepared_messages)
         tool_names = _extract_tool_names(tools or [])
         logger.info(
             "LLM 요청 전송 messages=%s tools=%s endpoint=%s",
@@ -115,7 +125,7 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             )
 
             if "roles must alternate" in detail.lower():
-                flattened = _flatten_messages(messages)
+                flattened = _flatten_messages(prepared_messages)
                 retry_payload = {
                     "model": model,
                     "messages": flattened,
@@ -163,6 +173,96 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
 def _flatten_messages(messages: list[dict]) -> list[dict]:
     content = "\n".join(f"[{msg['role']}] {msg['content']}" for msg in messages)
     return [{"role": "user", "content": content}]
+
+
+def _prepare_messages_for_request(
+    *,
+    messages: list[dict],
+    model: str,
+    use_gemma_adapter: bool,
+) -> list[dict]:
+    if not use_gemma_adapter:
+        return messages
+    if "gemma" not in (model or "").lower():
+        return messages
+    return _adapt_messages_for_gemma_template(messages)
+
+
+def _adapt_messages_for_gemma_template(messages: list[dict]) -> list[dict]:
+    """
+    Gemma chat_template 규칙과 맞추기 위한 전처리:
+    1) 첫 system 메시지를 첫 user 메시지 prefix로 이동
+    2) 대화 role을 user/assistant 교대로 보정
+    """
+    if not messages:
+        return []
+
+    copied = [{"role": msg.get("role"), "content": msg.get("content", "")} for msg in messages]
+    system_prefix = ""
+    start_index = 0
+
+    if copied and copied[0].get("role") == "system":
+        system_prefix = _content_to_text(copied[0].get("content"))
+        start_index = 1
+
+    body = copied[start_index:]
+    if not body:
+        return [{"role": "user", "content": system_prefix.strip()}]
+
+    if system_prefix:
+        first = body[0]
+        if first.get("role") == "user":
+            first_text = _content_to_text(first.get("content"))
+            first["content"] = f"{system_prefix.strip()}\n\n{first_text}".strip()
+        else:
+            body.insert(0, {"role": "user", "content": system_prefix.strip()})
+
+    normalized: list[dict] = []
+    expected_role = "user"
+    for msg in body:
+        role = msg.get("role")
+        if role not in {"user", "assistant"}:
+            role = "user"
+        content = msg.get("content", "")
+        if not normalized:
+            if role != expected_role:
+                normalized.append({"role": expected_role, "content": ""})
+            normalized.append({"role": role, "content": content})
+            expected_role = "assistant" if role == "user" else "user"
+            continue
+
+        prev = normalized[-1]
+        if role == prev.get("role"):
+            prev_text = _content_to_text(prev.get("content"))
+            content_text = _content_to_text(content)
+            prev["content"] = f"{prev_text}\n\n{content_text}".strip()
+            continue
+
+        if role != expected_role:
+            normalized.append({"role": expected_role, "content": ""})
+            expected_role = "assistant" if expected_role == "user" else "user"
+
+        normalized.append({"role": role, "content": content})
+        expected_role = "assistant" if role == "user" else "user"
+
+    if normalized and normalized[0].get("role") != "user":
+        normalized.insert(0, {"role": "user", "content": ""})
+
+    return normalized
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+        return "\n".join(texts).strip()
+    return str(content) if content is not None else ""
 
 
 def _sanitize_messages(messages: list[dict]) -> list[dict]:
