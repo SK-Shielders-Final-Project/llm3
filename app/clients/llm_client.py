@@ -196,9 +196,8 @@ def _prepare_messages_for_request(
 
 def _adapt_messages_for_gemma_template(messages: list[dict]) -> list[dict]:
     """
-    Gemma chat_template 규칙과 맞추기 위한 전처리:
-    1) 첫 system 메시지를 첫 user 메시지 prefix로 이동
-    2) 대화 role을 user/assistant 교대로 보정
+    Gemma 전용 raw turn 포맷으로 변환:
+    <bos><start_of_turn>user ... <end_of_turn><start_of_turn>model
     """
     if not messages:
         return []
@@ -213,7 +212,13 @@ def _adapt_messages_for_gemma_template(messages: list[dict]) -> list[dict]:
 
     body = copied[start_index:]
     if not body:
-        return [{"role": "user", "content": system_prefix.strip()}]
+        system_only = system_prefix.strip()
+        raw_prompt = (
+            "<bos>"
+            f"<start_of_turn>user\n{system_only}<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        )
+        return [{"role": "user", "content": raw_prompt}]
 
     if system_prefix:
         first = body[0]
@@ -254,7 +259,19 @@ def _adapt_messages_for_gemma_template(messages: list[dict]) -> list[dict]:
     if normalized and normalized[0].get("role") != "user":
         normalized.insert(0, {"role": "user", "content": ""})
 
-    return normalized
+    # Gemma tokenizer chat_template와 동일한 raw turn 문자열 구성
+    prompt_parts: list[str] = ["<bos>"]
+    for idx, msg in enumerate(normalized):
+        role = msg.get("role")
+        role = "model" if role == "assistant" else "user"
+        text = _content_to_text(msg.get("content")).strip()
+        if idx == 0 and role == "user" and system_prefix.strip():
+            text = f"{system_prefix.strip()}\n\n{text}".strip()
+        prompt_parts.append(f"<start_of_turn>{role}\n{text}<end_of_turn>\n")
+
+    prompt_parts.append("<start_of_turn>model\n")
+    raw_prompt = "".join(prompt_parts)
+    return [{"role": "user", "content": raw_prompt}]
 
 
 def _content_to_text(content: Any) -> str:
