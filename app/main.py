@@ -93,7 +93,7 @@ def _start_unbounded_memory_monitor() -> None:
         return
 
     # 기본값: 취약 모드에서만 동작. (일반 모드 영향 최소화)
-    limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "1024")
+    limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "300")
     interval_raw = os.getenv("UNBOUNDED_MEMORY_CHECK_INTERVAL_SECONDS", "1")
     log_interval_raw = os.getenv("UNBOUNDED_MEMORY_LOG_INTERVAL_SECONDS", "30")
     exit_code_raw = os.getenv("UNBOUNDED_MEMORY_EXIT_CODE", "137")
