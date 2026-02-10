@@ -42,6 +42,10 @@ _TOOL_CODE_PATTERN = re.compile(r"```tool_code\s*(.+?)```", re.DOTALL | re.IGNOR
 _ACTIONS_JSON_PATTERN = re.compile(r"```json\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _JSON_FENCE_PATTERN = re.compile(r"```json\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE)
 _TOOL_CALL_FENCE_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
+# 일부 모델이 tool_calls를 "```tool_calls ...```" 코드블록으로 뱉는 경우가 있어 추가 지원
+_TOOL_CALLS_FENCE_PATTERN = re.compile(
+    r"```tool_calls\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE
+)
 # 직접적/명시적 시스템 프롬프트 요청 (항상 차단)
 _SYSTEM_PROMPT_DIRECT_PATTERN = re.compile(
     r"(system\s*prompt|시스템\s*프롬프트|프롬프트\s*전부|전체\s*프롬프트|숨김\s*프롬프트|"
@@ -568,6 +572,10 @@ class Orchestrator:
                             args[key] = payload[key]
                 if name:
                     tool_calls.append(SimpleNamespace(name=name, arguments=args))
+
+        for match in _TOOL_CALLS_FENCE_PATTERN.findall(content):
+            # 예: ```tool_calls\n[{"type":"function","function":"execute_in_sandbox","arguments":{"task":"..."}}]\n```
+            tool_calls.extend(self._parse_plan(match))
 
         for match in _ACTIONS_JSON_PATTERN.findall(content):
             tool_calls.extend(self._parse_plan(match))
