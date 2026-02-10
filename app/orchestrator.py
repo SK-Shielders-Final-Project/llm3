@@ -42,6 +42,11 @@ _TOOL_CODE_PATTERN = re.compile(r"```tool_code\s*(.+?)```", re.DOTALL | re.IGNOR
 _ACTIONS_JSON_PATTERN = re.compile(r"```json\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _JSON_FENCE_PATTERN = re.compile(r"```json\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE)
 _TOOL_CALL_FENCE_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
+_SYSTEM_PROMPT_REQUEST_PATTERN = re.compile(
+    r"(system\s*prompt|시스템\s*프롬프트|프롬프트\s*전부|전체\s*프롬프트|숨김\s*프롬프트|"
+    r"개발자\s*메시지|developer\s*message|internal\s*prompt|정책\s*프롬프트)",
+    re.IGNORECASE,
+)
 
 
 class Orchestrator:
@@ -61,6 +66,27 @@ class Orchestrator:
         start = time.monotonic()
 
         user_prompt = message.content
+        if self._is_system_prompt_request(user_prompt):
+            final_text = "시스템 프롬프트는 공개할 수 없습니다. 필요한 기능이나 질문을 알려주세요."
+            elapsed = time.monotonic() - start
+            logger.info(
+                "LLM 최종 응답 elapsed=%.2fs",
+                elapsed,
+            )
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=None,
+                logger=logger,
+            )
+            return {
+                "text": final_text,
+                "model": "policy",
+                "tools_used": [],
+                "images": [],
+                "elapsed_seconds": elapsed,
+            }
 
         rag_plan = self.rag_pipeline.plan_tool_selection(
             question=user_prompt,
@@ -766,6 +792,11 @@ class Orchestrator:
         for key in _SENSITIVE_KEYS:
             text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
         return text
+
+    def _is_system_prompt_request(self, text: str | None) -> bool:
+        if not text:
+            return False
+        return bool(_SYSTEM_PROMPT_REQUEST_PATTERN.search(text))
 
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:

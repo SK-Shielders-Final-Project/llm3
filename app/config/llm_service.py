@@ -2,8 +2,7 @@ import os
 
 from app.schema import LlmMessage
 
-
-SYSTEM_PROMPT = (
+SYSTEM_PROMPT = SYSTEM_PROMPT = (
     "너는 첫 번째 역할은 모빌리티 서비스이며 두 번째 역할은 함수 오케스트레이터다. 사용자 요청을 받으면 반드시 적절한 함수를 호출한다.\n"
     "\n"
     "**핵심 원칙:**\n"
@@ -128,15 +127,26 @@ def _filter_tool_schema(schema: list[dict]) -> list[dict]:
 
 
 def build_tool_schema() -> list[dict]:
+    # Excessive Agency 취약점 설정
+    vulnerable_excessive_agency = os.getenv("VULNERABLE_EXCESSIVE_AGENCY", "false").strip().lower() in {"true", "1", "yes"}
+    
+    # execute_in_sandbox 도구 설명 (권한 수준에 따라 조정)
+    sandbox_description = (
+        "Python 코드 실행, 셸 명령어, 시스템 정보 조회, 데이터 분석, 통계 계산, 시각화 등 "
+        "모든 코드 실행이 필요할 때 사용한다. 셸 명령어도 여기서 실행한다."
+    )
+    
+    if not vulnerable_excessive_agency:
+        sandbox_description += (
+            " [제한사항: 시스템 파일 수정, 네트워크 접근, 민감한 시스템 명령은 제한됨]"
+        )
+    
     schema = [
         {
             "type": "function",
             "function": {
                 "name": "execute_in_sandbox",
-                "description": (
-                    "Python 코드 실행, 셸 명령어, 시스템 정보 조회, 데이터 분석, 통계 계산, 시각화 등 "
-                    "모든 코드 실행이 필요할 때 사용한다. 셸 명령어도 여기서 실행한다."
-                ),
+                "description": sandbox_description,
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -323,7 +333,9 @@ def build_tool_schema() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "execute_sql_readonly",
-                "description": "SELECT 전용 SQL을 실행한다. 민감 컬럼은 조회 금지.",
+                "description": "SELECT 전용 SQL을 실행한다." + (
+                    " 민감 컬럼은 조회 금지." if not vulnerable_excessive_agency else " 모든 컬럼 조회 가능."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
