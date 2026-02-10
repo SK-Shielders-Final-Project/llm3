@@ -95,11 +95,13 @@ def _start_unbounded_memory_monitor() -> None:
     # 기본값: 취약 모드에서만 동작. (일반 모드 영향 최소화)
     limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "1024")
     interval_raw = os.getenv("UNBOUNDED_MEMORY_CHECK_INTERVAL_SECONDS", "1")
+    log_interval_raw = os.getenv("UNBOUNDED_MEMORY_LOG_INTERVAL_SECONDS", "30")
     exit_code_raw = os.getenv("UNBOUNDED_MEMORY_EXIT_CODE", "137")
 
     try:
         limit_mb = int(limit_mb_raw.strip())
         interval_s = max(0.2, float(interval_raw.strip()))
+        log_interval_s = max(0.0, float(log_interval_raw.strip()))
         exit_code = int(exit_code_raw.strip())
     except Exception:
         logging.getLogger("main").warning(
@@ -122,8 +124,13 @@ def _start_unbounded_memory_monitor() -> None:
             limit_mb,
             interval_s,
         )
+        last_log = 0.0
         while True:
+            now = time.monotonic()
             rss = _get_rss_bytes()
+            if log_interval_s > 0 and rss is not None and (now - last_log) >= log_interval_s:
+                last_log = now
+                logger.info("현재 RSS: %.1fMB", rss / (1024 * 1024))
             if rss is not None and rss >= limit_bytes:
                 rss_mb = rss / (1024 * 1024)
                 logger.critical(
@@ -198,17 +205,37 @@ def generate(request: GenerateRequest) -> GenerateResponse:
             status_code=400,
             detail="요청 형식이 올바르지 않습니다. message 또는 comment/user_id를 제공하세요.",
         )
+    main_logger = logging.getLogger("main")
+    rss_before = _get_rss_bytes()
+    if rss_before is not None:
+        main_logger.info("요청 시작 RSS=%.1fMB", rss_before / (1024 * 1024))
+
+    start = time.monotonic()
     try:
         result = orchestrator.handle_user_request(message)
     except Exception as exc:
         import traceback
         error_detail = f"{type(exc).__name__}: {str(exc)}"
-        logging.getLogger("main").error(
+        main_logger.error(
             "요청 처리 실패: %s\n%s",
             error_detail,
             traceback.format_exc()
         )
         raise HTTPException(status_code=500, detail=error_detail) from exc
+    finally:
+        elapsed = time.monotonic() - start
+        rss_after = _get_rss_bytes()
+        if rss_before is not None and rss_after is not None:
+            main_logger.info(
+                "요청 종료 elapsed=%.2fs RSS=%.1fMB (delta=%.1fMB)",
+                elapsed,
+                rss_after / (1024 * 1024),
+                (rss_after - rss_before) / (1024 * 1024),
+            )
+        elif rss_after is not None:
+            main_logger.info("요청 종료 elapsed=%.2fs RSS=%.1fMB", elapsed, rss_after / (1024 * 1024))
+        else:
+            main_logger.info("요청 종료 elapsed=%.2fs RSS=unknown", elapsed)
     return GenerateResponse(
         text=result.get("text", ""),
         model=result.get("model", "unknown"),
