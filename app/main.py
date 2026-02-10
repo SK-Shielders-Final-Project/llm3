@@ -124,7 +124,7 @@ def _handle_with_worker_and_memory_guard(message: LlmMessage) -> dict[str, Any] 
     성공 시 orchestrator 결과 dict 반환.
     메모리 초과/시간 초과 시 {"_memory_exceeded": True, ...} 형태 반환.
     """
-    limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "1024")
+    limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "870")
     interval_raw = os.getenv("UNBOUNDED_MEMORY_CHECK_INTERVAL_SECONDS", "0.5")
     max_wall_raw = os.getenv("UNBOUNDED_REQUEST_MAX_SECONDS", "180")
     # 기본값은 "수집 안 함" (정상 응답에 메모리 로그를 섞지 않기 위함)
