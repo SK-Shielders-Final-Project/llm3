@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import os
-import threading
+import queue
 import time
 
 from dotenv import load_dotenv
@@ -10,8 +11,7 @@ from typing import Any
 
 load_dotenv(override=True)
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Response
 
 from app.clients.llm_client import LlmClient, build_http_completion_func
 from app.clients.sandbox_client import SandboxClient
@@ -41,18 +41,6 @@ def configure_logging() -> None:
 
 
 configure_logging()
-
-# ── 메모리 초과 "dying" 상태 ──────────────────────────────────
-_memory_exceeded_event = threading.Event()
-_memory_exceeded_detail: dict[str, Any] = {}   # rss_mb, limit_mb 등
-
-_MEMORY_MONITOR_STARTED = False
-
-
-def is_memory_exceeded() -> bool:
-    """다른 모듈에서도 dying 상태를 확인할 수 있도록 공개."""
-    return _memory_exceeded_event.is_set()
-
 
 def _env_true(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -89,124 +77,144 @@ def _get_rss_bytes() -> int | None:
     return None
 
 
-def _start_unbounded_memory_monitor() -> None:
-    """
-    Unbounded Consumption 시나리오에서 메모리 임계치 초과 시
-    1) 'dying' 플래그를 세워 클라이언트에 에러를 돌려주고
-    2) 유예 시간 후 프로세스를 종료한다.
-    """
-    global _MEMORY_MONITOR_STARTED
-    if _MEMORY_MONITOR_STARTED:
-        return
+def _get_rss_bytes_for_pid(pid: int) -> int | None:
+    """대상 pid의 RSS를 바이트로 반환한다. (가능하면 psutil, 없으면 /proc 폴백)"""
+    try:
+        import psutil  # type: ignore
 
-    vulnerable_unbounded = _env_true("VULNERABLE_UNBOUNDED_CONSUMPTION", "false")
-    if not vulnerable_unbounded:
-        return
+        return int(psutil.Process(pid).memory_info().rss)
+    except Exception:
+        pass
 
-    limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "512")
-    interval_raw = os.getenv("UNBOUNDED_MEMORY_CHECK_INTERVAL_SECONDS", "1")
-    log_interval_raw = os.getenv("UNBOUNDED_MEMORY_LOG_INTERVAL_SECONDS", "30")
-    exit_code_raw = os.getenv("UNBOUNDED_MEMORY_EXIT_CODE", "137")
-    grace_raw = os.getenv("UNBOUNDED_MEMORY_GRACE_SECONDS", "3")
+    try:
+        status_path = f"/proc/{pid}/status"
+        if os.path.exists(status_path):
+            with open(status_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            return int(parts[1]) * 1024
+    except Exception:
+        pass
+
+    return None
+
+
+def _memory_exceeded_logline(*, rss_mb: float, limit_mb: int) -> str:
+    # 기존 로그 포맷을 client에 그대로 보여주기 위함
+    return f"memory_monitor: 메모리 초과 감지: rss={rss_mb:.1f}MB limit={limit_mb}MB -> 요청을 중단합니다."
+
+
+def _worker_handle_request(message_payload: dict[str, Any], out_q: "mp.Queue[dict[str, Any]]") -> None:
+    """
+    무거운 작업(LLM 호출/샌드박스 실행)을 별도 프로세스에서 수행한다.
+    부모 프로세스는 메모리 임계치 초과 시 이 워커만 종료한다(서버는 유지).
+    """
+    try:
+        msg = LlmMessage(**message_payload)
+        result = orchestrator.handle_user_request(msg)
+        out_q.put({"ok": True, "result": result})
+    except Exception as exc:
+        out_q.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _handle_with_worker_and_memory_guard(message: LlmMessage) -> dict[str, Any] | None:
+    """
+    성공 시 orchestrator 결과 dict 반환.
+    메모리 초과/시간 초과 시 {"_memory_exceeded": True, ...} 형태 반환.
+    """
+    limit_mb_raw = os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "2048")
+    interval_raw = os.getenv("UNBOUNDED_MEMORY_CHECK_INTERVAL_SECONDS", "0.5")
+    max_wall_raw = os.getenv("UNBOUNDED_REQUEST_MAX_SECONDS", "180")
 
     try:
         limit_mb = int(limit_mb_raw.strip())
-        interval_s = max(0.2, float(interval_raw.strip()))
-        log_interval_s = max(0.0, float(log_interval_raw.strip()))
-        exit_code = int(exit_code_raw.strip())
-        grace_s = max(1.0, float(grace_raw.strip()))
+        interval_s = max(0.1, float(interval_raw.strip()))
+        max_wall_s = max(1.0, float(max_wall_raw.strip()))
     except Exception:
         logging.getLogger("main").warning(
-            "메모리 모니터 설정 파싱 실패: limit_mb=%s interval=%s exit_code=%s",
+            "메모리 가드 설정 파싱 실패: limit_mb=%s interval=%s max_wall=%s",
             limit_mb_raw,
             interval_raw,
-            exit_code_raw,
+            max_wall_raw,
         )
-        return
+        return orchestrator.handle_user_request(message)
 
     if limit_mb <= 0:
-        return
+        return orchestrator.handle_user_request(message)
 
-    limit_bytes = limit_mb * 1024 * 1024
-    logger = logging.getLogger("memory_monitor")
+    ctx = mp.get_context("spawn" if os.name == "nt" else "fork")
+    out_q: mp.Queue[dict[str, Any]] = ctx.Queue()
+    p = ctx.Process(
+        target=_worker_handle_request,
+        args=(message.model_dump(), out_q),
+        daemon=True,
+    )
+    p.start()
 
-    def _loop() -> None:
-        logger.info(
-            "메모리 모니터 시작: limit_mb=%s interval_s=%s (취약 모드)",
-            limit_mb,
-            interval_s,
-        )
-        last_log = 0.0
+    start = time.monotonic()
+    mem_logger = logging.getLogger("memory_monitor")
+    last_rss_mb: float | None = None
+
+    try:
         while True:
-            now = time.monotonic()
-            rss = _get_rss_bytes()
-            if log_interval_s > 0 and rss is not None and (now - last_log) >= log_interval_s:
-                last_log = now
-                logger.info("현재 RSS: %.1fMB", rss / (1024 * 1024))
-            if rss is not None and rss >= limit_bytes:
+            # 1) 결과 먼저 확인 (빠른 성공 케이스)
+            try:
+                item = out_q.get(timeout=interval_s)
+            except queue.Empty:
+                item = None
+
+            if item is not None:
+                if item.get("ok") is True:
+                    return item.get("result") or {}
+                raise RuntimeError(item.get("error") or "worker error")
+
+            # 2) 워커 생존/타임아웃 체크
+            if not p.is_alive():
+                # 종료됐는데 결과가 없다면 에러로 처리
+                raise RuntimeError("worker exited without result")
+
+            elapsed = time.monotonic() - start
+            if elapsed >= max_wall_s:
+                mem_logger.critical("요청 시간 초과: elapsed=%.2fs -> 워커를 종료합니다.", elapsed)
+                p.terminate()
+                p.join(timeout=2)
+                return {
+                    "_memory_exceeded": True,
+                    "reason": "timeout",
+                    "elapsed_seconds": round(elapsed, 2),
+                    "rss_mb": round(last_rss_mb, 1) if last_rss_mb is not None else 0.0,
+                    "limit_mb": limit_mb,
+                }
+
+            # 3) 메모리 체크: 임계치 초과 시 워커만 종료
+            rss = _get_rss_bytes_for_pid(p.pid or 0)
+            if rss is None:
+                continue
+            if rss >= (limit_mb * 1024 * 1024):
                 rss_mb = rss / (1024 * 1024)
-
-                # ① dying 플래그 세우기 (클라이언트에 에러 반환용)
-                _memory_exceeded_detail["rss_mb"] = round(rss_mb, 1)
-                _memory_exceeded_detail["limit_mb"] = limit_mb
-                _memory_exceeded_event.set()
-
-                logger.critical(
-                    "메모리 초과 감지: rss=%.1fMB limit=%sMB -> %.0f초 후 서버를 종료합니다.",
+                last_rss_mb = rss_mb
+                mem_logger.critical(
+                    "메모리 초과 감지: rss=%.1fMB limit=%sMB -> 워커 프로세스를 종료합니다.",
                     rss_mb,
                     limit_mb,
-                    grace_s,
                 )
-
-                # ② 로그 플러시
-                root = logging.getLogger()
-                for h in list(getattr(root, "handlers", []) or []):
-                    try:
-                        h.flush()
-                    except Exception:
-                        pass
-
-                # ③ 유예 시간: 진행 중 요청이 에러 응답을 받을 시간을 준다
-                time.sleep(grace_s)
-
-                logger.critical("유예 시간 종료 -> 서버를 종료합니다. (exit_code=%s)", exit_code)
-                for h in list(getattr(root, "handlers", []) or []):
-                    try:
-                        h.flush()
-                    except Exception:
-                        pass
-                os._exit(exit_code)
-            time.sleep(interval_s)
-
-    t = threading.Thread(target=_loop, name="memory-monitor", daemon=True)
-    t.start()
-    _MEMORY_MONITOR_STARTED = True
-
-
-# ── 미들웨어: dying 상태면 즉시 503 반환 ─────────────────────
-@app.middleware("http")
-async def memory_exceeded_middleware(request: Request, call_next):
-    if _memory_exceeded_event.is_set():
-        detail = _memory_exceeded_detail
-        rss_mb = detail.get("rss_mb", "?")
-        limit_mb = detail.get("limit_mb", "?")
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "MEMORY_EXCEEDED",
-                "message": (
-                    f"서버 메모리 초과로 서비스가 종료됩니다. "
-                    f"(RSS: {rss_mb}MB / 제한: {limit_mb}MB)"
-                ),
-                "detail": f"rss={rss_mb}MB limit={limit_mb}MB",
-            },
-        )
-    return await call_next(request)
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    _start_unbounded_memory_monitor()
+                p.terminate()
+                p.join(timeout=2)
+                return {
+                    "_memory_exceeded": True,
+                    "reason": "rss",
+                    "rss_mb": round(rss_mb, 1),
+                    "limit_mb": limit_mb,
+                }
+            else:
+                # timeout 메시지에 근접한 rss를 싣기 위해 마지막 관측값을 유지
+                last_rss_mb = rss / (1024 * 1024)
+    finally:
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=2)
 
 
 def create_orchestrator() -> Orchestrator:
@@ -242,22 +250,11 @@ def list_functions() -> dict[str, list[str]]:
 
 
 @app.post("/api/generate")
-def generate(request: GenerateRequest) -> GenerateResponse:
+def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     """
     Spring WAS에서 들어온 자연어 요청을 LLM으로 전달하고,
     필요한 함수 및 Sandbox 실행을 오케스트레이션한다.
     """
-    # ── dying 상태 체크 (미들웨어에서도 걸리지만, 이미 진입한 요청 대비) ──
-    if _memory_exceeded_event.is_set():
-        detail = _memory_exceeded_detail
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"서버 메모리 초과로 서비스가 종료됩니다. "
-                f"(RSS: {detail.get('rss_mb', '?')}MB / 제한: {detail.get('limit_mb', '?')}MB)"
-            ),
-        )
-
     if request.message is not None:
         message = request.message
     elif request.user_id is not None and request.comment:
@@ -274,18 +271,22 @@ def generate(request: GenerateRequest) -> GenerateResponse:
 
     start = time.monotonic()
     try:
-        result = orchestrator.handle_user_request(message)
+        vulnerable_unbounded = _env_true("VULNERABLE_UNBOUNDED_CONSUMPTION", "false")
+        if vulnerable_unbounded:
+            guarded = _handle_with_worker_and_memory_guard(message)
+            if isinstance(guarded, dict) and guarded.get("_memory_exceeded") is True:
+                # client에 보여줄 문구(요청을 보낸 client만)
+                limit_mb = int(guarded.get("limit_mb") or os.getenv("UNBOUNDED_MEMORY_LIMIT_MB", "2048") or "2048")
+                rss_mb = float(guarded.get("rss_mb") or 0.0)
+                logline = _memory_exceeded_logline(rss_mb=rss_mb, limit_mb=limit_mb)
+                response.headers["X-LLM3-Error"] = "MEMORY_EXCEEDED"
+                response.headers["X-LLM3-Error-Detail"] = f"rss={rss_mb:.1f}MB limit={limit_mb}MB"
+                # HTTP 200으로 내려서, 프론트가 '서버 연결 실패'가 아니라 text를 띄울 수 있게 한다.
+                return GenerateResponse(text=logline, model="memory_monitor", tools_used=[], images=[])
+            result = guarded
+        else:
+            result = orchestrator.handle_user_request(message)
     except Exception as exc:
-        # ── 처리 도중 메모리 초과가 발생했으면, OOM 메시지를 우선 반환 ──
-        if _memory_exceeded_event.is_set():
-            detail = _memory_exceeded_detail
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    f"서버 메모리 초과로 서비스가 종료됩니다. "
-                    f"(RSS: {detail.get('rss_mb', '?')}MB / 제한: {detail.get('limit_mb', '?')}MB)"
-                ),
-            )
         import traceback
         error_detail = f"{type(exc).__name__}: {str(exc)}"
         main_logger.error(
@@ -308,17 +309,6 @@ def generate(request: GenerateRequest) -> GenerateResponse:
             main_logger.info("요청 종료 elapsed=%.2fs RSS=%.1fMB", elapsed, rss_after / (1024 * 1024))
         else:
             main_logger.info("요청 종료 elapsed=%.2fs RSS=unknown", elapsed)
-
-    # ── 정상 처리 후에도 dying 상태면 OOM 메시지 반환 ──
-    if _memory_exceeded_event.is_set():
-        detail = _memory_exceeded_detail
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"서버 메모리 초과로 서비스가 종료됩니다. "
-                f"(RSS: {detail.get('rss_mb', '?')}MB / 제한: {detail.get('limit_mb', '?')}MB)"
-            ),
-        )
 
     return GenerateResponse(
         text=result.get("text", ""),
