@@ -191,13 +191,21 @@ def _prepare_messages_for_request(
         return messages
     if "gemma" not in (model or "").lower():
         return messages
+    use_raw_turn_prompt = os.getenv("USE_RAW_GEMMA_TURN_PROMPT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if use_raw_turn_prompt:
+        return _build_raw_gemma_turn_prompt(messages)
     return _adapt_messages_for_gemma_template(messages)
 
 
 def _adapt_messages_for_gemma_template(messages: list[dict]) -> list[dict]:
     """
-    Gemma 전용 raw turn 포맷으로 변환:
-    <bos><start_of_turn>user ... <end_of_turn><start_of_turn>model
+    Gemma chat_template 규칙과 맞추기 위한 전처리:
+    1) 첫 system 메시지를 첫 user 메시지 prefix로 이동
+    2) 대화 role을 user/assistant 교대로 보정
     """
     if not messages:
         return []
@@ -212,13 +220,7 @@ def _adapt_messages_for_gemma_template(messages: list[dict]) -> list[dict]:
 
     body = copied[start_index:]
     if not body:
-        system_only = system_prefix.strip()
-        raw_prompt = (
-            "<bos>"
-            f"<start_of_turn>user\n{system_only}<end_of_turn>\n"
-            "<start_of_turn>model\n"
-        )
-        return [{"role": "user", "content": raw_prompt}]
+        return [{"role": "user", "content": system_prefix.strip()}]
 
     if system_prefix:
         first = body[0]
@@ -259,16 +261,27 @@ def _adapt_messages_for_gemma_template(messages: list[dict]) -> list[dict]:
     if normalized and normalized[0].get("role") != "user":
         normalized.insert(0, {"role": "user", "content": ""})
 
-    # Gemma tokenizer chat_template와 동일한 raw turn 문자열 구성
+    return normalized
+
+
+def _build_raw_gemma_turn_prompt(messages: list[dict]) -> list[dict]:
+    """
+    실험/디버그용: raw turn 문자열을 직접 구성해 단일 user 메시지로 전송한다.
+    기본 동작은 아님(USE_RAW_GEMMA_TURN_PROMPT=true 일 때만 사용).
+    """
+    if not messages:
+        return []
+
+    normalized = _adapt_messages_for_gemma_template(messages)
+    if not normalized:
+        return []
+
     prompt_parts: list[str] = ["<bos>"]
-    for idx, msg in enumerate(normalized):
+    for msg in normalized:
         role = msg.get("role")
         role = "model" if role == "assistant" else "user"
         text = _content_to_text(msg.get("content")).strip()
-        if idx == 0 and role == "user" and system_prefix.strip():
-            text = f"{system_prefix.strip()}\n\n{text}".strip()
         prompt_parts.append(f"<start_of_turn>{role}\n{text}<end_of_turn>\n")
-
     prompt_parts.append("<start_of_turn>model\n")
     raw_prompt = "".join(prompt_parts)
     return [{"role": "user", "content": raw_prompt}]
