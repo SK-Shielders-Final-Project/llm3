@@ -198,7 +198,9 @@ class Orchestrator:
                 is_refusal = any(phrase in response_lower for phrase in [
                     '실행할 수 없', '지원하지 않', '제공할 수 없', '처리할 수 없',
                     'cannot execute', 'not supported', 'not available', '죄송합니다',
-                    '명령어', '구문이 잘못'
+                    # NOTE: 아래처럼 너무 일반적인 단어(예: "명령어")는 기능 설명에도 자주 등장해
+                    # 오탐이 나서 불필요한 샌드박스 강제 호출을 유발한다.
+                    '명령어를 실행할 수 없', '구문이 잘못되'
                 ])
                 if is_refusal:
                     logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출: %s", message.content)

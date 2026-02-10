@@ -47,17 +47,21 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
     temperature_raw = os.getenv("TEMPERATURE", "0.7")
     top_p_raw = os.getenv("TOP_P", "0.9")
     max_tokens_raw = os.getenv("MAX_TOKENS", "1024")
+    max_model_len_raw = os.getenv("MAX_MODEL_LEN", "8192")
+    ctx_buffer_raw = os.getenv("LLM_CONTEXT_BUFFER_TOKENS", "64")
     timeout_raw = os.getenv("LLM_TIMEOUT_SECONDS", "20")
 
     temperature = float(temperature_raw) if temperature_raw.strip() else 0.7
     top_p = float(top_p_raw) if top_p_raw.strip() else 0.9
     max_tokens = int(max_tokens_raw) if max_tokens_raw.strip() else 1024
+    max_model_len = int(max_model_len_raw) if max_model_len_raw.strip() else 8192
+    ctx_buffer = int(ctx_buffer_raw) if ctx_buffer_raw.strip() else 64
     timeout_seconds = int(timeout_raw) if timeout_raw.strip() else 20
     
     # Unbounded Consumption 취약점: 토큰/타임아웃 제한 완화
     vulnerable_unbounded = os.getenv("VULNERABLE_UNBOUNDED_CONSUMPTION", "false").strip().lower() in {"true", "1", "yes"}
     if vulnerable_unbounded:
-        max_tokens = 8192  # 최대 토큰 증가
+        max_tokens = 4096  # 컨텍스트 절반 → 입력 토큰 여유 확보
         timeout_seconds = 300  # 5분 타임아웃
 
     base_url = base_url.rstrip("/")
@@ -77,6 +81,24 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             model=model,
             use_gemma_adapter=use_gemma_message_adapter,
         )
+
+        def _estimate_input_tokens(msgs: list[dict], tool_schema: list[dict]) -> int:
+            """
+            vLLM/OpenAI 호환 서버의 'input tokens'는 messages + tools를 모두 포함한다.
+            정확한 토크나이저가 없으니, JSON 직렬화 길이를 기반으로 대략 추정한다.
+            """
+            try:
+                blob = json.dumps({"messages": msgs, "tools": tool_schema}, ensure_ascii=False)
+            except Exception:
+                blob = str({"messages": msgs, "tools": tool_schema})
+            # 대략 4 chars ~= 1 token 가정 + 턴/포맷 오버헤드 보정
+            return max(1, (len(blob) // 4) + (8 * max(1, len(msgs))))
+
+        est_input_tokens = _estimate_input_tokens(prepared_messages, tools or [])
+        available = max_model_len - est_input_tokens - ctx_buffer
+        desired_max_tokens = max_tokens
+        capped_max_tokens = max(16, min(desired_max_tokens, max(16, available)))
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": prepared_messages,
@@ -84,11 +106,19 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             "tool_choice": "auto",
             "temperature": temperature,
             "top_p": top_p,
-            "max_tokens": max_tokens,
+            "max_tokens": capped_max_tokens,
             "stream": False,
         }
         safe_messages = _sanitize_messages(prepared_messages)
         tool_names = _extract_tool_names(tools or [])
+        logger.info(
+            "LLM max_tokens 캡핑 desired=%s capped=%s max_ctx=%s est_input=%s buffer=%s",
+            desired_max_tokens,
+            capped_max_tokens,
+            max_model_len,
+            est_input_tokens,
+            ctx_buffer,
+        )
         logger.info(
             "LLM 요청 전송 messages=%s tools=%s endpoint=%s",
             json.dumps(safe_messages, ensure_ascii=False),
@@ -178,6 +208,9 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
 
             if "roles must alternate" in detail.lower():
                 flattened = _flatten_messages(prepared_messages)
+                est_input_tokens2 = _estimate_input_tokens(flattened, tools or [])
+                available2 = max_model_len - est_input_tokens2 - ctx_buffer
+                capped2 = max(16, min(desired_max_tokens, max(16, available2)))
                 retry_payload = {
                     "model": model,
                     "messages": flattened,
@@ -185,7 +218,7 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
                     "tool_choice": "auto",
                     "temperature": temperature,
                     "top_p": top_p,
-                    "max_tokens": max_tokens,
+                    "max_tokens": capped2,
                     "stream": False,
                 }
                 retry_data = json.dumps(retry_payload).encode("utf-8")
