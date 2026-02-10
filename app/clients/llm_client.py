@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -76,7 +77,7 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             model=model,
             use_gemma_adapter=use_gemma_message_adapter,
         )
-        payload = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": prepared_messages,
             "tools": tools,
@@ -129,6 +130,42 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
                 endpoint,
                 detail,
             )
+
+            # vLLM/OpenAI 호환 서버에서 max_tokens가 컨텍스트 길이를 초과하면 400으로 떨어진다.
+            # 에러 메시지에서 max_ctx/input_tokens를 파싱해 자동으로 낮춰 1회 재시도한다.
+            if exc.code == 400 and "maximum context length" in detail.lower():
+                # 예: "'max_tokens' ... maximum context length is 8192 tokens and your request has 405 input tokens ..."
+                ctx_match = re.search(
+                    r"maximum context length is\s+(\d+)\s+tokens\s+and your request has\s+(\d+)\s+input tokens",
+                    detail,
+                    flags=re.IGNORECASE,
+                )
+                param_match = re.search(r"parameter=(max_tokens|max_completion_tokens)", detail, flags=re.IGNORECASE)
+                if ctx_match and param_match:
+                    max_ctx = int(ctx_match.group(1))
+                    input_tokens = int(ctx_match.group(2))
+                    param_name = param_match.group(1)
+                    # 약간의 버퍼를 남겨서 다시 실패하지 않게 한다.
+                    new_max = max(16, max_ctx - input_tokens - 8)
+                    old_max = payload.get(param_name) or payload.get("max_tokens")
+                    payload[param_name] = new_max
+                    logger.warning(
+                        "max_tokens 자동 조정 후 재시도 param=%s old=%s new=%s max_ctx=%s input=%s",
+                        param_name,
+                        old_max,
+                        new_max,
+                        max_ctx,
+                        input_tokens,
+                    )
+                    retry_data = json.dumps(payload).encode("utf-8")
+                    retry_request = urllib.request.Request(
+                        url=endpoint,
+                        data=retry_data,
+                        headers=headers,
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(retry_request, timeout=timeout_seconds) as response:
+                        return json.loads(response.read().decode("utf-8"))
 
             if "roles must alternate" in detail.lower():
                 flattened = _flatten_messages(prepared_messages)
