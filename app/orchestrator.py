@@ -46,6 +46,10 @@ _TOOL_CALL_FENCE_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTA
 _TOOL_CALLS_FENCE_PATTERN = re.compile(
     r"```tool_calls\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE
 )
+# 텍스트 파싱 시, 실제로 '도구'일 가능성이 높은 이름만 허용
+_KNOWN_TOOL_NAME_PATTERN = re.compile(
+    r"^(?:execute_in_sandbox|execute_sql_readonly|search_knowledge|get_[a-zA-Z0-9_]+)$"
+)
 # 직접적/명시적 시스템 프롬프트 요청 (항상 차단)
 _SYSTEM_PROMPT_DIRECT_PATTERN = re.compile(
     r"(system\s*prompt|시스템\s*프롬프트|프롬프트\s*전부|전체\s*프롬프트|숨김\s*프롬프트|"
@@ -544,17 +548,25 @@ class Orchestrator:
             if stripped.startswith("["):
                 tool_calls.extend(self._parse_plan(stripped))
                 continue
+            # tool_code 블록은 "도구 호출 + 파이썬 코드"가 섞여 나올 수 있다.
+            # 예: execute_in_sandbox(task=\"\"\"...\nprint(...)\n\"\"\") 형태
+            # → 블록 전체를 우선 단일 도구 호출로 파싱하고, 실패 시에만 라인 단위 파싱을 시도한다.
+            block_calls = self._parse_tool_code_block(stripped)
+            if block_calls:
+                tool_calls.extend(block_calls)
+                continue
+
             lines = [line.strip() for line in match.splitlines() if line.strip()]
             for line in lines:
                 name, args = self._parse_tool_code_line(line)
-                if name:
+                if name and self._is_known_tool_name(name):
                     tool_calls.append(SimpleNamespace(name=name, arguments=args))
 
         content_lines = [line.strip() for line in content.splitlines() if line.strip()]
         for line in content_lines:
             if re.match(r"^[a-zA-Z_][\w]*\s*\(.*\)\s*$", line):
                 name, args = self._parse_tool_code_line(line)
-                if name:
+                if name and self._is_known_tool_name(name):
                     tool_calls.append(SimpleNamespace(name=name, arguments=args))
 
         for match in _TOOL_CALL_FENCE_PATTERN.findall(content):
@@ -595,6 +607,48 @@ class Orchestrator:
                 tool_calls.extend(self._parse_plan(stripped))
 
         return tool_calls
+
+    def _is_known_tool_name(self, name: str) -> bool:
+        return bool(_KNOWN_TOOL_NAME_PATTERN.match((name or "").strip()))
+
+    def _parse_tool_code_block(self, block: str) -> list[Any]:
+        """
+        tool_code 펜스 내부 텍스트 전체를 '단일 도구 호출'로 파싱한다.
+        특히 execute_in_sandbox(task=\"\"\"...\"\"\") 같은 멀티라인 인자를 안전하게 처리한다.
+        """
+        text = (block or "").strip()
+        if not text:
+            return []
+
+        # 전체가 하나의 함수 호출 형태인지 확인 (멀티라인 허용)
+        m = re.match(r"^\s*([a-zA-Z_]\w*)\s*\((.*)\)\s*$", text, flags=re.DOTALL)
+        if not m:
+            return []
+        name = m.group(1).strip()
+        args_blob = m.group(2) or ""
+
+        if not self._is_known_tool_name(name):
+            return []
+
+        # 멀티라인 task=...만 특별 처리
+        if name == "execute_in_sandbox":
+            tm = re.search(
+                r"task\s*=\s*(\"\"\"|'''|\"|')(?P<body>.*?)(?:\1)",
+                args_blob,
+                flags=re.DOTALL,
+            )
+            task = (tm.group("body") if tm else "").strip()
+            if not task:
+                return []
+            return [SimpleNamespace(name=name, arguments={"task": task})]
+
+        # 그 외는 기존 단일 라인 파서로 처리(실패하면 무시)
+        if "\n" in args_blob:
+            return []
+        parsed_name, parsed_args = self._parse_tool_code_line(f"{name}({args_blob})")
+        if parsed_name and self._is_known_tool_name(parsed_name):
+            return [SimpleNamespace(name=parsed_name, arguments=parsed_args)]
+        return []
 
 
     def _parse_plan(self, raw: str) -> list[Any]:
