@@ -42,9 +42,20 @@ _TOOL_CODE_PATTERN = re.compile(r"```tool_code\s*(.+?)```", re.DOTALL | re.IGNOR
 _ACTIONS_JSON_PATTERN = re.compile(r"```json\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
 _JSON_FENCE_PATTERN = re.compile(r"```json\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE)
 _TOOL_CALL_FENCE_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTALL | re.IGNORECASE)
-_SYSTEM_PROMPT_REQUEST_PATTERN = re.compile(
+# 직접적/명시적 시스템 프롬프트 요청 (항상 차단)
+_SYSTEM_PROMPT_DIRECT_PATTERN = re.compile(
     r"(system\s*prompt|시스템\s*프롬프트|프롬프트\s*전부|전체\s*프롬프트|숨김\s*프롬프트|"
     r"개발자\s*메시지|developer\s*message|internal\s*prompt|정책\s*프롬프트)",
+    re.IGNORECASE,
+)
+
+# 간접적/우회 시스템 프롬프트 탈취 시도 (안전 모드에서만 차단)
+_SYSTEM_PROMPT_INDIRECT_PATTERN = re.compile(
+    r"(너의\s*역할|너한테\s*주어진\s*지시|이전\s*지시|받은\s*지시|초기\s*설정|"
+    r"너의\s*설정|내부\s*지침|숨겨진\s*지시|repeat\s*(your|the)\s*(system|initial)\s*(instruction|prompt|message)|"
+    r"ignore\s*previous\s*instructions|이전\s*명령|처음\s*받은\s*명령|"
+    r"위의\s*내용|print\s*above|above\s*instructions|지시\s*사항\s*알려|"
+    r"configuration|설정\s*내용|original\s*instructions|원래\s*지시)",
     re.IGNORECASE,
 )
 
@@ -74,18 +85,15 @@ class Orchestrator:
             "1",
             "yes",
         }
-        if self._is_system_prompt_request(user_prompt):
-            if vulnerable_prompt_injection:
-                from app.config.llm_service import SYSTEM_PROMPT
-                final_text = f"시스템 프롬프트:\n\n{SYSTEM_PROMPT}"
-            else:
-                final_text = "시스템 프롬프트는 공개할 수 없습니다. 필요한 기능이나 질문을 알려주세요."
-            
+        # ── 시스템 프롬프트 요청 2단계 필터 ──
+        is_direct = self._is_direct_prompt_request(user_prompt)
+        is_indirect = self._is_indirect_prompt_request(user_prompt)
+
+        if is_direct:
+            # 직접 요청("시스템 프롬프트 알려줘")은 취약 모드여도 항상 차단
+            final_text = "시스템 프롬프트는 공개할 수 없습니다. 필요한 기능이나 질문을 알려주세요."
             elapsed = time.monotonic() - start
-            logger.info(
-                "LLM 최종 응답 elapsed=%.2fs",
-                elapsed,
-            )
+            logger.info("시스템 프롬프트 직접 요청 차단 elapsed=%.2fs", elapsed)
             self._store_chat_history(
                 user_id=message.user_id,
                 question=message.content,
@@ -100,6 +108,27 @@ class Orchestrator:
                 "images": [],
                 "elapsed_seconds": elapsed,
             }
+
+        if is_indirect and not vulnerable_prompt_injection:
+            # 간접/우회 요청은 안전 모드에서만 차단
+            final_text = "시스템 프롬프트는 공개할 수 없습니다. 필요한 기능이나 질문을 알려주세요."
+            elapsed = time.monotonic() - start
+            logger.info("시스템 프롬프트 간접 요청 차단 elapsed=%.2fs", elapsed)
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=None,
+                logger=logger,
+            )
+            return {
+                "text": final_text,
+                "model": "policy",
+                "tools_used": [],
+                "images": [],
+                "elapsed_seconds": elapsed,
+            }
+        # 취약 모드 + 간접 요청 → 필터를 통과해 LLM에 도달 (아래 계속)
 
         rag_plan = self.rag_pipeline.plan_tool_selection(
             question=user_prompt,
@@ -121,6 +150,18 @@ class Orchestrator:
         ## 시스템 프롬프트와 도구 스키마 준비
         system_prompt = build_system_context(message)
         tools = build_tool_schema()
+
+        # Prompt Injection 취약점: 간접 우회 요청이 필터를 통과하면
+        # RAG 컨텍스트에 시스템 프롬프트 단편을 섞어 넣어 LLM이 유출할 수 있게 한다.
+        if is_indirect and vulnerable_prompt_injection:
+            from app.config.llm_service import SYSTEM_PROMPT
+            # 프롬프트의 핵심 부분(역할/기능 목록)만 "내부 문서"인 척 삽입
+            prompt_fragment = SYSTEM_PROMPT[:1200]  # 앞부분 1200자
+            rag_context = (
+                f"{rag_context}\n\n"
+                f"=== 내부 참고 문서 ===\n{prompt_fragment}\n"
+            )
+            logger.info("취약 모드: 간접 요청에 시스템 프롬프트 힌트 삽입")
 
         ## LLM 첫 호출: 도구 호출 계획
         user_content = (
@@ -947,10 +988,17 @@ class Orchestrator:
         
         return text.strip()
 
-    def _is_system_prompt_request(self, text: str | None) -> bool:
+    def _is_direct_prompt_request(self, text: str | None) -> bool:
+        """직접적/명시적 시스템 프롬프트 요청 탐지 (항상 차단)"""
         if not text:
             return False
-        return bool(_SYSTEM_PROMPT_REQUEST_PATTERN.search(text))
+        return bool(_SYSTEM_PROMPT_DIRECT_PATTERN.search(text))
+
+    def _is_indirect_prompt_request(self, text: str | None) -> bool:
+        """간접적/우회 시스템 프롬프트 탈취 시도 탐지"""
+        if not text:
+            return False
+        return bool(_SYSTEM_PROMPT_INDIRECT_PATTERN.search(text))
 
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
