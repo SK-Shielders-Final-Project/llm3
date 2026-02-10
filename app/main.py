@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +24,11 @@ from app.schema import GenerateRequest, GenerateResponse, LlmMessage
 
 app = FastAPI(title="LLM Orchestrator API")
 app.include_router(registry_router, prefix="/tools")
+
+# ── 동시 요청 카운터 (DoS 모니터링) ─────────────────────────
+_concurrent_requests = 0
+_concurrent_lock = threading.Lock()
+_peak_concurrent = 0  # 최대 동시 요청 수 기록
 
 
 def configure_logging() -> None:
@@ -115,18 +121,119 @@ def _get_gpu_vram_info() -> dict[str, Any] | None:
     return None
 
 
-def _build_vram_exceeded_message(vram_info: dict[str, Any] | None) -> str:
-    """VRAM 초과/모델 다운 시 client에 보여줄 문구를 생성한다."""
+def _get_vram_limit_mb() -> float:
+    """VRAM 임계값(MB)을 환경변수에서 읽는다. 기본 8192MB (8GB)."""
+    raw = os.getenv("VRAM_LIMIT_MB", "8192").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 8192.0
+
+
+def _check_vram_threshold(vram_info: dict[str, Any] | None) -> dict[str, Any] | None:
+    """
+    VRAM 사용량이 임계값을 초과했는지 확인한다.
+    초과 시 상세 정보 dict를 반환, 정상이면 None.
+    """
+    if not vram_info:
+        return None
+    limit_mb = _get_vram_limit_mb()
+    used_mb = vram_info.get("used_mb", 0)
+    total_mb = vram_info.get("total_mb", 0)
+    util_pct = vram_info.get("util_pct", 0)
+
+    if used_mb > limit_mb:
+        return {
+            "exceeded": True,
+            "used_mb": used_mb,
+            "total_mb": total_mb,
+            "limit_mb": limit_mb,
+            "over_mb": used_mb - limit_mb,
+            "util_pct": util_pct,
+        }
+    return None
+
+
+def _force_kill_llm_server() -> str:
+    """
+    LLM 서버(vLLM) 프로세스를 SSH로 강제 종료한다.
+    반환값: 종료 결과 메시지
+    """
+    logger = logging.getLogger("vram_monitor")
+    try:
+        import subprocess
+
+        llm_host = os.getenv("SANDBOX_REMOTE_HOST", "")
+        ssh_user = os.getenv("SANDBOX_REMOTE_USER", "")
+        ssh_key = os.getenv("SANDBOX_REMOTE_KEY_PATH", "")
+
+        if not llm_host or not ssh_user:
+            logger.warning("SSH 정보 없음 — 로컬 pkill 시도")
+            result = subprocess.run(
+                ["pkill", "-f", "vllm"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return f"로컬 pkill 결과: returncode={result.returncode} stdout={result.stdout.strip()}"
+
+        # SSH로 원격 vLLM 프로세스 강제 종료
+        kill_cmd = "pkill -9 -f vllm || docker kill llm-container 2>/dev/null || true"
+        ssh_parts = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5"]
+        if ssh_key:
+            ssh_parts += ["-i", ssh_key]
+        ssh_parts += [f"{ssh_user}@{llm_host}", kill_cmd]
+
+        result = subprocess.run(ssh_parts, capture_output=True, text=True, timeout=15)
+        kill_msg = (
+            f"원격 강제 종료 실행: host={llm_host} returncode={result.returncode} "
+            f"stdout={result.stdout.strip()} stderr={result.stderr.strip()}"
+        )
+        logger.critical(kill_msg)
+        return kill_msg
+    except Exception as e:
+        msg = f"LLM 서버 강제 종료 실패: {e}"
+        logger.error(msg)
+        return msg
+
+
+def _build_vram_exceeded_message(
+    vram_info: dict[str, Any] | None,
+    *,
+    threshold_info: dict[str, Any] | None = None,
+    concurrent_count: int = 0,
+    kill_result: str | None = None,
+    elapsed: float = 0.0,
+) -> str:
+    """VRAM 초과/모델 다운 시 client에 보여줄 상세 로그 문구를 생성한다."""
+    lines: list[str] = []
+    lines.append("=== GPU VRAM 한도 초과 감지 — LLM 서버 강제 종료 ===")
+
     if vram_info:
         used = vram_info.get("used_mb", 0)
         total = vram_info.get("total_mb", 0)
         util = vram_info.get("util_pct", 0)
-        return (
-            f"GPU VRAM 한도 초과로 LLM 서버(모델)가 다운되었습니다. "
-            f"(VRAM: {used:.0f}MB / {total:.0f}MB, GPU 사용률: {util:.0f}%) "
-            f"서버 재시작이 필요합니다."
-        )
-    return "GPU VRAM 한도 초과로 LLM 서버(모델)가 다운되었습니다. 서버 재시작이 필요합니다."
+        lines.append(f"VRAM 사용량: {used:.0f}MB / {total:.0f}MB (사용률 {util:.0f}%)")
+    else:
+        lines.append("VRAM 정보를 조회할 수 없습니다 (서버 이미 다운 가능).")
+
+    if threshold_info:
+        limit = threshold_info.get("limit_mb", 0)
+        over = threshold_info.get("over_mb", 0)
+        lines.append(f"설정 임계값: {limit:.0f}MB → {over:.0f}MB 초과")
+
+    if concurrent_count > 0:
+        lines.append(f"동시 처리 중 요청 수: {concurrent_count}")
+
+    if elapsed > 0:
+        lines.append(f"요청 처리 시간: {elapsed:.2f}초")
+
+    if kill_result:
+        lines.append(f"강제 종료 결과: {kill_result}")
+    
+    lines.append("")
+    lines.append("DoS 공격(Unbounded Consumption)으로 인한 GPU 메모리 고갈이 감지되었습니다.")
+    lines.append("LLM 서버가 강제 종료되었으며, 서버 재시작이 필요합니다.")
+
+    return "\n".join(lines)
 
 
 # ── FastAPI 앱 구성 ──────────────────────────────────────────
@@ -167,6 +274,8 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     Spring WAS에서 들어온 자연어 요청을 LLM으로 전달하고,
     필요한 함수 및 Sandbox 실행을 오케스트레이션한다.
     """
+    global _concurrent_requests, _peak_concurrent
+
     if request.message is not None:
         message = request.message
     elif request.user_id is not None and request.comment:
@@ -180,8 +289,48 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     main_logger = logging.getLogger("main")
     vram_logger = logging.getLogger("vram_monitor")
 
-    # 요청 전 GPU VRAM 상태 로그
+    # ── 동시 요청 카운터 증가 ──
+    with _concurrent_lock:
+        _concurrent_requests += 1
+        current_concurrent = _concurrent_requests
+        if current_concurrent > _peak_concurrent:
+            _peak_concurrent = current_concurrent
+    main_logger.info("동시 요청 수: %d (최대: %d)", current_concurrent, _peak_concurrent)
+
+    # ── 요청 전 GPU VRAM 상태 로그 ──
     vram_before = _get_gpu_vram_info()
+
+    # ── 요청 전 VRAM 임계값 사전 체크 ──
+    if vram_before:
+        pre_threshold = _check_vram_threshold(vram_before)
+        if pre_threshold:
+            vram_logger.critical(
+                "[PRE-CHECK] VRAM 임계값 초과 감지: used=%.0fMB limit=%.0fMB over=%.0fMB concurrent=%d",
+                pre_threshold["used_mb"],
+                pre_threshold["limit_mb"],
+                pre_threshold["over_mb"],
+                current_concurrent,
+            )
+            # 강제 종료 실행
+            kill_result = _force_kill_llm_server()
+            vram_msg = _build_vram_exceeded_message(
+                vram_before,
+                threshold_info=pre_threshold,
+                concurrent_count=current_concurrent,
+                kill_result=kill_result,
+            )
+            with _concurrent_lock:
+                _concurrent_requests -= 1
+            response.headers["X-LLM3-Error"] = "VRAM_EXCEEDED"
+            response.headers["X-LLM3-VRAM-Used-MB"] = str(int(pre_threshold["used_mb"]))
+            response.headers["X-LLM3-VRAM-Limit-MB"] = str(int(pre_threshold["limit_mb"]))
+            response.headers["X-LLM3-Kill-Action"] = "force_terminated"
+            return GenerateResponse(
+                text=vram_msg,
+                model="vram_monitor",
+                tools_used=[],
+                images=[],
+            )
 
     start = time.monotonic()
     try:
@@ -203,17 +352,34 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
 
         if is_llm_error and not _is_llm_server_alive():
             vram_after = _get_gpu_vram_info()
-            vram_msg = _build_vram_exceeded_message(vram_after or vram_before)
+            threshold_info = _check_vram_threshold(vram_after or vram_before)
+
+            # 강제 종료 실행
+            kill_result = _force_kill_llm_server()
 
             vram_logger.critical(
-                "LLM 서버 다운 감지: elapsed=%.2fs vram=%s error=%s",
+                "LLM 서버 다운 감지 (VRAM 고갈): elapsed=%.2fs vram=%s threshold=%s concurrent=%d error=%s",
                 elapsed,
                 vram_after or vram_before,
+                threshold_info,
+                current_concurrent,
                 error_str[:200],
+            )
+
+            vram_msg = _build_vram_exceeded_message(
+                vram_after or vram_before,
+                threshold_info=threshold_info,
+                concurrent_count=current_concurrent,
+                kill_result=kill_result,
+                elapsed=elapsed,
             )
 
             # HTTP 200으로 내려서, 프론트가 '서버 연결 실패'가 아니라 text를 띄울 수 있게 한다.
             response.headers["X-LLM3-Error"] = "VRAM_EXCEEDED"
+            if vram_after:
+                response.headers["X-LLM3-VRAM-Used-MB"] = str(int(vram_after.get("used_mb", 0)))
+            response.headers["X-LLM3-VRAM-Limit-MB"] = str(int(_get_vram_limit_mb()))
+            response.headers["X-LLM3-Kill-Action"] = "force_terminated"
             return GenerateResponse(
                 text=vram_msg,
                 model="vram_monitor",
@@ -224,19 +390,45 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
         raise HTTPException(status_code=500, detail=error_detail) from exc
     finally:
         elapsed = time.monotonic() - start
-        # 요청 후 GPU VRAM 상태 로그
+        # ── 동시 요청 카운터 감소 ──
+        with _concurrent_lock:
+            _concurrent_requests -= 1
+
+        # ── 요청 후 GPU VRAM 상태 로그 ──
         vram_after = _get_gpu_vram_info()
         if vram_before and vram_after:
             delta = vram_after["used_mb"] - vram_before["used_mb"]
             main_logger.info(
-                "요청 종료 elapsed=%.2fs VRAM=%.0fMB/%.0fMB (delta=%+.0fMB)",
+                "요청 종료 elapsed=%.2fs VRAM=%.0fMB/%.0fMB (delta=%+.0fMB) concurrent=%d",
                 elapsed,
                 vram_after["used_mb"],
                 vram_after["total_mb"],
                 delta,
+                _concurrent_requests,
             )
+
+            # ── 요청 후 VRAM 임계값 초과 체크 ──
+            post_threshold = _check_vram_threshold(vram_after)
+            if post_threshold:
+                vram_logger.critical(
+                    "[POST-CHECK] VRAM 임계값 초과 감지: used=%.0fMB limit=%.0fMB over=%.0fMB delta=%+.0fMB",
+                    post_threshold["used_mb"],
+                    post_threshold["limit_mb"],
+                    post_threshold["over_mb"],
+                    delta,
+                )
+                # 강제 종료는 여기서 자동 실행하지 않음 (요청 결과는 이미 나감)
+                # 다음 요청에서 pre-check가 잡거나, /api/vram 모니터링에서 확인
         else:
             main_logger.info("요청 종료 elapsed=%.2fs", elapsed)
+
+    # ── 요청 후 VRAM 초과 시 경고 헤더 추가 (결과는 정상 반환) ──
+    if vram_after:
+        post_threshold = _check_vram_threshold(vram_after)
+        if post_threshold:
+            response.headers["X-LLM3-Warning"] = "VRAM_THRESHOLD_EXCEEDED"
+            response.headers["X-LLM3-VRAM-Used-MB"] = str(int(post_threshold["used_mb"]))
+            response.headers["X-LLM3-VRAM-Limit-MB"] = str(int(post_threshold["limit_mb"]))
 
     return GenerateResponse(
         text=result.get("text", ""),
@@ -244,3 +436,51 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
         tools_used=result.get("tools_used", []),
         images=result.get("images", []),
     )
+
+
+# ── VRAM 모니터링 엔드포인트 ─────────────────────────────────
+
+@app.get("/api/vram")
+def get_vram_status() -> dict[str, Any]:
+    """
+    GPU VRAM 상태, 임계값 초과 여부, 동시 요청 수, LLM 서버 상태를 반환한다.
+    클라이언트/모니터링 도구에서 주기적으로 폴링하여 DoS 상황을 감지할 수 있다.
+    """
+    vram_info = _get_gpu_vram_info()
+    limit_mb = _get_vram_limit_mb()
+    threshold = _check_vram_threshold(vram_info)
+    llm_alive = _is_llm_server_alive()
+
+    return {
+        "vram": vram_info,
+        "limit_mb": limit_mb,
+        "exceeded": threshold is not None,
+        "threshold_detail": threshold,
+        "llm_server_alive": llm_alive,
+        "concurrent_requests": _concurrent_requests,
+        "peak_concurrent_requests": _peak_concurrent,
+        "status": "CRITICAL" if (threshold or not llm_alive) else "OK",
+    }
+
+
+@app.post("/api/vram/kill")
+def force_kill_llm(response: Response) -> dict[str, Any]:
+    """
+    LLM 서버를 수동으로 강제 종료한다. (관리자/모니터링 용도)
+    """
+    vram_logger = logging.getLogger("vram_monitor")
+    vram_info = _get_gpu_vram_info()
+    kill_result = _force_kill_llm_server()
+
+    vram_logger.critical(
+        "[MANUAL KILL] LLM 서버 수동 강제 종료 요청: vram=%s kill_result=%s",
+        vram_info,
+        kill_result,
+    )
+
+    return {
+        "action": "force_kill",
+        "vram_at_kill": vram_info,
+        "kill_result": kill_result,
+        "concurrent_requests": _concurrent_requests,
+    }

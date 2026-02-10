@@ -61,8 +61,8 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
     # Unbounded Consumption 취약점: 토큰/타임아웃 제한 완화
     vulnerable_unbounded = os.getenv("VULNERABLE_UNBOUNDED_CONSUMPTION", "false").strip().lower() in {"true", "1", "yes"}
     if vulnerable_unbounded:
-        max_tokens = 4096  # 컨텍스트 절반 → 입력 토큰 여유 확보
-        timeout_seconds = 300  # 5분 타임아웃
+        max_tokens = max_model_len  # 컨텍스트 전체를 출력 토큰으로 허용 → VRAM 폭증 유발
+        timeout_seconds = 600  # 10분 타임아웃 (긴 생성 허용)
 
     base_url = base_url.rstrip("/")
     endpoint = os.getenv("LLM_CHAT_ENDPOINT", f"{base_url}/chat/completions")
@@ -97,7 +97,16 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
         est_input_tokens = _estimate_input_tokens(prepared_messages, tools or [])
         available = max_model_len - est_input_tokens - ctx_buffer
         desired_max_tokens = max_tokens
-        capped_max_tokens = max(16, min(desired_max_tokens, max(16, available)))
+
+        # Unbounded Consumption 취약점: 토큰 캡핑 우회 → VRAM 고갈 가능
+        if vulnerable_unbounded:
+            capped_max_tokens = desired_max_tokens  # 캡핑 없이 그대로 사용
+            logger.warning(
+                "[VULN] Unbounded Consumption 활성: 토큰 캡핑 우회 desired=%s (캡핑 없음)",
+                desired_max_tokens,
+            )
+        else:
+            capped_max_tokens = max(16, min(desired_max_tokens, max(16, available)))
 
         payload: dict[str, Any] = {
             "model": model,
