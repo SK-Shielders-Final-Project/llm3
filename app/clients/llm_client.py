@@ -42,7 +42,7 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
     if not base_url:
         raise RuntimeError("LLM_BASE_URL이 설정되지 않았습니다.")
 
-    model = os.getenv("MODEL_ID", "RedHatAI/gemma-3-12b-it-FP8-dynamic")
+    model = os.getenv("MODEL_ID", "RedHatAI/gemma-3-27b-it-quantized.w4a16")
     temperature_raw = os.getenv("TEMPERATURE", "0.7")
     top_p_raw = os.getenv("TOP_P", "0.9")
     max_tokens_raw = os.getenv("MAX_TOKENS", "1024")
