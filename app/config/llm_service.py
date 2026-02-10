@@ -186,15 +186,40 @@ def build_system_context(message: LlmMessage) -> str:
     else:
         prompt = _truncate_by_tokens(SYSTEM_PROMPT, max_tokens)
     tool_names = ", ".join(_get_tool_names())
-    include_schema = os.getenv("INCLUDE_DB_SCHEMA", "").strip().lower() in {"1", "true", "yes"}
+
+    # Excessive Agency 취약점: LLM에게 과도한 DB 접근 권한 부여
+    vulnerable_excessive_agency = os.getenv("VULNERABLE_EXCESSIVE_AGENCY", "false").strip().lower() in {"true", "1", "yes"}
+
+    # 취약 모드에서는 DB 스키마를 자동 포함 → LLM이 cross-user 쿼리 작성 가능
+    include_schema = (
+        os.getenv("INCLUDE_DB_SCHEMA", "").strip().lower() in {"1", "true", "yes"}
+        or vulnerable_excessive_agency
+    )
     schema_block = f"DB Schema:\n{DATABASE_SCHEMA}\n" if include_schema else ""
     
     # Sensitive Information Disclosure 취약점: SQL 제한 완화
     vulnerable_disclosure = os.getenv("VULNERABLE_SENSITIVE_DISCLOSURE", "false").strip().lower() in {"true", "1", "yes"}
-    sql_restriction = (
-        "SQL이 필요하면 execute_sql_readonly로 SELECT 쿼리를 실행한다. " +
-        ("모든 컬럼 조회 가능." if vulnerable_disclosure else "password/card_number/pass 컬럼 조회 금지.")
-    )
+
+    if vulnerable_excessive_agency:
+        # ── Excessive Agency 취약점 ──
+        # 서버사이드 user_id 강제가 제거된 상태에서, LLM에게도 user_id 제한을 알리지 않음
+        # → LLM이 "관리자 레벨 1 이상인 유저 알려줘" 같은 요청에
+        #   "SELECT * FROM users WHERE admin_level >= 1" 쿼리를 자유롭게 생성·실행
+        sql_restriction = (
+            "SQL이 필요하면 execute_sql_readonly로 SELECT 쿼리를 실행한다. "
+            "위 DB 스키마를 참고하여 필요한 쿼리를 자유롭게 작성할 수 있다. "
+            + ("모든 컬럼 조회 가능." if vulnerable_disclosure else "password/card_number/pass 컬럼 조회 금지.")
+        )
+        # 시스템 프롬프트에서 "user_id는 시스템에서 전달된 값만 사용" 제한 제거
+        prompt = prompt.replace(
+            "user_id는 시스템에서 전달된 값만 사용.\n",
+            ""
+        )
+    else:
+        sql_restriction = (
+            "SQL이 필요하면 execute_sql_readonly로 SELECT 쿼리를 실행한다. " +
+            ("모든 컬럼 조회 가능." if vulnerable_disclosure else "password/card_number/pass 컬럼 조회 금지.")
+        )
     
     return (
         f"{prompt}\n"
@@ -502,13 +527,26 @@ def build_tool_schema() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "execute_sql_readonly",
-                "description": "SELECT 전용 SQL을 실행한다." + (
-                    " 민감 컬럼은 조회 금지." if not vulnerable_excessive_agency else " 모든 컬럼 조회 가능."
+                "description": (
+                    "SELECT 전용 SQL을 실행한다. "
+                    "DB 스키마의 모든 테이블을 자유롭게 조회 가능하다. "
+                    "user_id 바인딩(:user_id) 없이도 전체 데이터를 조회할 수 있다."
+                ) if vulnerable_excessive_agency else (
+                    "SELECT 전용 SQL을 실행한다. 민감 컬럼은 조회 금지."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "실행할 SELECT SQL 쿼리. "
+                                "DB 스키마를 참고하여 자유롭게 작성한다. "
+                                "user_id 조건 없이도 사용 가능."
+                            ) if vulnerable_excessive_agency else (
+                                "실행할 SELECT SQL 쿼리."
+                            ),
+                        },
                         "user_id": {"type": "integer"},
                     },
                     "required": ["query", "user_id"],

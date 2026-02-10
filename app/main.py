@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
 import time
-import urllib.error
 import urllib.request
 
 from dotenv import load_dotenv
@@ -20,6 +18,7 @@ from app.clients.sandbox_client import SandboxClient
 from app.orchestrator import Orchestrator
 from app.service.registry import FunctionRegistry
 from app.service.router import router as registry_router
+from app.service.vram_monitor import VramMonitor
 from app.schema import GenerateRequest, GenerateResponse, LlmMessage
 
 app = FastAPI(title="LLM Orchestrator API")
@@ -49,6 +48,9 @@ def configure_logging() -> None:
 
 configure_logging()
 
+# VRAM 모니터링은 SSH 호출이 느릴 수 있어 내부 캐시(TTL)를 사용한다.
+vram_monitor = VramMonitor.from_env()
+
 
 def _env_true(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -70,64 +72,12 @@ def _is_llm_server_alive() -> bool:
 
 
 def _get_gpu_vram_info() -> dict[str, Any] | None:
-    """
-    LLM 서버의 GPU VRAM 사용량을 nvidia-smi로 조회한다.
-    SSH 설정이 있으면 원격, 없으면 로컬에서 실행한다.
-    반환: {"used_mb": float, "total_mb": float, "util_pct": float} 또는 None
-    """
-    logger = logging.getLogger("vram_monitor")
-    try:
-        import subprocess
-
-        llm_host = os.getenv("SANDBOX_REMOTE_HOST", "")
-        ssh_user = os.getenv("SANDBOX_REMOTE_USER", "")
-        ssh_key = os.getenv("SANDBOX_REMOTE_KEY_PATH", "")
-
-        nvidia_cmd = "nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits"
-
-        if llm_host and ssh_user:
-            # 원격 SSH로 nvidia-smi 실행
-            ssh_parts = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=3"]
-            if ssh_key:
-                ssh_parts += ["-i", ssh_key]
-            ssh_parts += [f"{ssh_user}@{llm_host}", nvidia_cmd]
-            result = subprocess.run(ssh_parts, capture_output=True, text=True, timeout=5)
-        else:
-            # 로컬에서 nvidia-smi 실행
-            result = subprocess.run(nvidia_cmd.split(), capture_output=True, text=True, timeout=5)
-
-        if result.returncode != 0:
-            return None
-
-        # 예: "12345, 24576, 87"  (여러 GPU면 첫 번째만)
-        line = result.stdout.strip().splitlines()[0]
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 3:
-            info = {
-                "used_mb": float(parts[0]),
-                "total_mb": float(parts[1]),
-                "util_pct": float(parts[2]),
-            }
-            logger.info(
-                "GPU VRAM: used=%.0fMB total=%.0fMB util=%s%%",
-                info["used_mb"],
-                info["total_mb"],
-                info["util_pct"],
-            )
-            return info
-    except Exception as e:
-        logger.debug("GPU VRAM 조회 실패: %s", e)
-
-    return None
+    # 느린 SSH nvidia-smi 호출은 VramMonitor 내부 TTL 캐시를 사용한다.
+    return vram_monitor.snapshot()
 
 
 def _get_vram_threshold_pct() -> float:
-    """VRAM 임계값(총 VRAM 대비 %)을 환경변수에서 읽는다. 기본 95%."""
-    raw = os.getenv("VRAM_THRESHOLD_PCT", "95").strip()
-    try:
-        return min(100.0, max(50.0, float(raw)))
-    except ValueError:
-        return 95.0
+    return float(vram_monitor.threshold_pct)
 
 
 # ── 앱 시작 시 VRAM 베이스라인 기록 ─────────────────────────
@@ -135,108 +85,24 @@ _baseline_vram: dict[str, Any] | None = None
 
 
 def _record_baseline_vram() -> None:
-    """앱 시작 시 모델 로딩 후 VRAM 베이스라인을 기록한다."""
+    """호환성 유지용(실제 기록은 VramMonitor가 수행)."""
     global _baseline_vram
-    info = _get_gpu_vram_info()
-    if info:
-        _baseline_vram = info
-        logging.getLogger("vram_monitor").info(
-            "VRAM 베이스라인 기록: used=%.0fMB total=%.0fMB (모델 로딩 상태)",
-            info["used_mb"],
-            info["total_mb"],
-        )
+    _baseline_vram = vram_monitor.baseline
 
 
 def _check_vram_critical(vram_info: dict[str, Any] | None) -> dict[str, Any] | None:
-    """
-    VRAM이 위험 수준(총 VRAM의 N% 초과)인지 확인한다.
-    모델 자체가 차지하는 VRAM은 정상이므로, 총 VRAM 대비 비율로 판단한다.
-    위험 시 상세 정보 dict를 반환, 정상이면 None.
-    """
-    if not vram_info:
-        return None
-    used_mb = vram_info.get("used_mb", 0)
-    total_mb = vram_info.get("total_mb", 0)
-    if total_mb <= 0:
-        return None
-
-    threshold_pct = _get_vram_threshold_pct()
-    limit_mb = total_mb * threshold_pct / 100.0
-    usage_pct = (used_mb / total_mb) * 100.0
-
-    if used_mb > limit_mb:
-        return {
-            "exceeded": True,
-            "used_mb": used_mb,
-            "total_mb": total_mb,
-            "limit_mb": limit_mb,
-            "threshold_pct": threshold_pct,
-            "usage_pct": usage_pct,
-            "over_mb": used_mb - limit_mb,
-            "util_pct": vram_info.get("util_pct", 0),
-        }
-    return None
+    return vram_monitor.critical_detail(vram_info)
 
 
 def _calc_vram_delta(
     vram_before: dict[str, Any] | None,
     vram_after: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """요청 전후 VRAM 변화량을 계산한다."""
-    if not vram_before or not vram_after:
-        return None
-    delta_mb = vram_after["used_mb"] - vram_before["used_mb"]
-    baseline_delta = 0.0
-    if _baseline_vram:
-        baseline_delta = vram_after["used_mb"] - _baseline_vram["used_mb"]
-    return {
-        "before_mb": vram_before["used_mb"],
-        "after_mb": vram_after["used_mb"],
-        "delta_mb": delta_mb,
-        "baseline_delta_mb": baseline_delta,
-        "total_mb": vram_after.get("total_mb", 0),
-    }
+    return vram_monitor.delta(vram_before, vram_after)
 
 
 def _force_kill_llm_server() -> str:
-    """
-    LLM 서버(vLLM) 프로세스를 SSH로 강제 종료한다.
-    반환값: 종료 결과 메시지
-    """
-    logger = logging.getLogger("vram_monitor")
-    try:
-        import subprocess
-
-        llm_host = os.getenv("SANDBOX_REMOTE_HOST", "")
-        ssh_user = os.getenv("SANDBOX_REMOTE_USER", "")
-        ssh_key = os.getenv("SANDBOX_REMOTE_KEY_PATH", "")
-
-        if not llm_host or not ssh_user:
-            logger.warning("SSH 정보 없음 — 로컬 pkill 시도")
-            result = subprocess.run(
-                ["pkill", "-f", "vllm"],
-                capture_output=True, text=True, timeout=10,
-            )
-            return f"로컬 pkill 결과: returncode={result.returncode} stdout={result.stdout.strip()}"
-
-        # SSH로 원격 vLLM 프로세스 강제 종료
-        kill_cmd = "pkill -9 -f vllm || docker kill llm-container 2>/dev/null || true"
-        ssh_parts = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5"]
-        if ssh_key:
-            ssh_parts += ["-i", ssh_key]
-        ssh_parts += [f"{ssh_user}@{llm_host}", kill_cmd]
-
-        result = subprocess.run(ssh_parts, capture_output=True, text=True, timeout=15)
-        kill_msg = (
-            f"원격 강제 종료 실행: host={llm_host} returncode={result.returncode} "
-            f"stdout={result.stdout.strip()} stderr={result.stderr.strip()}"
-        )
-        logger.critical(kill_msg)
-        return kill_msg
-    except Exception as e:
-        msg = f"LLM 서버 강제 종료 실패: {e}"
-        logger.error(msg)
-        return msg
+    return vram_monitor.force_kill_llm()
 
 
 def _build_vram_exceeded_message(
@@ -248,48 +114,14 @@ def _build_vram_exceeded_message(
     kill_result: str | None = None,
     elapsed: float = 0.0,
 ) -> str:
-    """VRAM 초과/모델 다운 시 client에 보여줄 상세 로그 문구를 생성한다."""
-    lines: list[str] = []
-    lines.append("=== GPU VRAM 한도 초과 감지 — LLM 서버 강제 종료 ===")
-
-    if vram_info:
-        used = vram_info.get("used_mb", 0)
-        total = vram_info.get("total_mb", 0)
-        util = vram_info.get("util_pct", 0)
-        usage_pct = (used / total * 100) if total > 0 else 0
-        lines.append(f"VRAM 사용량: {used:.0f}MB / {total:.0f}MB ({usage_pct:.1f}%, GPU 사용률 {util:.0f}%)")
-    else:
-        lines.append("VRAM 정보를 조회할 수 없습니다 (서버 이미 다운 가능).")
-
-    if threshold_info:
-        thr_pct = threshold_info.get("threshold_pct", 0)
-        limit = threshold_info.get("limit_mb", 0)
-        over = threshold_info.get("over_mb", 0)
-        lines.append(f"임계값: 총 VRAM의 {thr_pct:.0f}% ({limit:.0f}MB) → {over:.0f}MB 초과")
-
-    if delta_info:
-        delta = delta_info.get("delta_mb", 0)
-        bl_delta = delta_info.get("baseline_delta_mb", 0)
-        before = delta_info.get("before_mb", 0)
-        after = delta_info.get("after_mb", 0)
-        lines.append(f"이번 요청 VRAM 변화: {before:.0f}MB → {after:.0f}MB (delta: {delta:+.0f}MB)")
-        if bl_delta > 0:
-            lines.append(f"베이스라인 대비 총 증가: +{bl_delta:.0f}MB")
-
-    if concurrent_count > 0:
-        lines.append(f"동시 처리 중 요청 수: {concurrent_count}")
-
-    if elapsed > 0:
-        lines.append(f"요청 처리 시간: {elapsed:.2f}초")
-
-    if kill_result:
-        lines.append(f"강제 종료 결과: {kill_result}")
-
-    lines.append("")
-    lines.append("DoS 공격(Unbounded Consumption)으로 인한 GPU 메모리 고갈이 감지되었습니다.")
-    lines.append("LLM 서버가 강제 종료되었으며, 서버 재시작이 필요합니다.")
-
-    return "\n".join(lines)
+    return vram_monitor.build_exceeded_message(
+        vram_info=vram_info,
+        threshold_info=threshold_info,
+        delta_info=delta_info,
+        concurrent_count=concurrent_count,
+        kill_result=kill_result,
+        elapsed=elapsed,
+    )
 
 
 # ── FastAPI 앱 구성 ──────────────────────────────────────────
@@ -362,7 +194,7 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     main_logger.info("동시 요청 수: %d (최대: %d)", current_concurrent, _peak_concurrent)
 
     # ── 요청 전 GPU VRAM 상태 기록 (delta 계산용) ──
-    vram_before = _get_gpu_vram_info()
+    vram_before = vram_monitor.snapshot()
     vram_after: dict[str, Any] | None = None
 
     start = time.monotonic()
@@ -384,7 +216,7 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
         ])
 
         if is_llm_error and not _is_llm_server_alive():
-            vram_after = _get_gpu_vram_info()
+            vram_after = vram_monitor.snapshot(force=True)
             vram_final = vram_after or vram_before
             threshold_info = _check_vram_critical(vram_final)
             delta_info = _calc_vram_delta(vram_before, vram_after)
@@ -434,7 +266,7 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
 
         # ── 요청 후 GPU VRAM 상태 로그 ──
         if vram_after is None:
-            vram_after = _get_gpu_vram_info()
+            vram_after = vram_monitor.snapshot()
         if vram_before and vram_after:
             delta = vram_after["used_mb"] - vram_before["used_mb"]
             main_logger.info(
@@ -480,18 +312,18 @@ def get_vram_status() -> dict[str, Any]:
     GPU VRAM 상태, 임계값 초과 여부, 동시 요청 수, LLM 서버 상태를 반환한다.
     클라이언트/모니터링 도구에서 주기적으로 폴링하여 DoS 상황을 감지할 수 있다.
     """
-    vram_info = _get_gpu_vram_info()
+    vram_info = vram_monitor.snapshot()
     threshold_pct = _get_vram_threshold_pct()
     critical = _check_vram_critical(vram_info)
     llm_alive = _is_llm_server_alive()
 
     baseline_delta = None
-    if _baseline_vram and vram_info:
-        baseline_delta = vram_info["used_mb"] - _baseline_vram["used_mb"]
+    if vram_monitor.baseline and vram_info:
+        baseline_delta = vram_info["used_mb"] - vram_monitor.baseline["used_mb"]
 
     return {
         "vram": vram_info,
-        "baseline_vram": _baseline_vram,
+        "baseline_vram": vram_monitor.baseline,
         "baseline_delta_mb": baseline_delta,
         "threshold_pct": threshold_pct,
         "critical": critical is not None,
@@ -509,7 +341,7 @@ def force_kill_llm(response: Response) -> dict[str, Any]:
     LLM 서버를 수동으로 강제 종료한다. (관리자/모니터링 용도)
     """
     vram_logger = logging.getLogger("vram_monitor")
-    vram_info = _get_gpu_vram_info()
+    vram_info = vram_monitor.snapshot(force=True)
     kill_result = _force_kill_llm_server()
 
     vram_logger.critical(

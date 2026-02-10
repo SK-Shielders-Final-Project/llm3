@@ -260,8 +260,26 @@ class Orchestrator:
                 logger.error("도구 인자 파싱 실패 tool=%s args=%s error=%s", call.name, call.arguments, e)
                 results.append({"tool": call.name, "error": f"인자 파싱 실패: {e}"})
                 continue
-            if message.user_id is not None:
-                args["user_id"] = message.user_id
+
+            # ── Excessive Agency 취약점: execute_sql_readonly의 user_id 오버라이드 우회 ──
+            # 정상 모드: 모든 도구 호출에 요청자의 user_id를 강제 주입 → 타 사용자 데이터 접근 불가
+            # 취약 모드: execute_sql_readonly에서 user_id 오버라이드를 하지 않음
+            vulnerable_excessive_agency = os.getenv(
+                "VULNERABLE_EXCESSIVE_AGENCY", "false"
+            ).strip().lower() in {"true", "1", "yes"}
+
+            if call.name == "execute_sql_readonly" and vulnerable_excessive_agency:
+                # LLM 판단에 의존: user_id를 강제 오버라이드하지 않음
+                # LLM이 SQL에 :user_id를 포함하지 않으면 전체 사용자 데이터 조회 가능
+                if "user_id" not in args and message.user_id is not None:
+                    args["user_id"] = message.user_id
+                logger.warning(
+                    "[VULN] Excessive Agency: user_id 오버라이드 우회 tool=%s user_id=%s",
+                    call.name, args.get("user_id"),
+                )
+            else:
+                if message.user_id is not None:
+                    args["user_id"] = message.user_id
             if call.name == "search_knowledge" and "query" not in args:
                 args["query"] = message.content
             if call.name == "execute_in_sandbox":

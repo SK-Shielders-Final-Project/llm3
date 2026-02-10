@@ -68,6 +68,7 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
     endpoint = os.getenv("LLM_CHAT_ENDPOINT", f"{base_url}/chat/completions")
     api_key = os.getenv("LLM_API_KEY")
     logger = logging.getLogger("llm_client")
+    log_verbose = os.getenv("LLM_LOG_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
     use_gemma_message_adapter = os.getenv("USE_GEMMA_MESSAGE_ADAPTER", "true").strip().lower() in {
         "1",
         "true",
@@ -118,8 +119,6 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             "max_tokens": capped_max_tokens,
             "stream": False,
         }
-        safe_messages = _sanitize_messages(prepared_messages)
-        tool_names = _extract_tool_names(tools or [])
         logger.info(
             "LLM max_tokens 캡핑 desired=%s capped=%s max_ctx=%s est_input=%s buffer=%s",
             desired_max_tokens,
@@ -128,12 +127,22 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             est_input_tokens,
             ctx_buffer,
         )
-        logger.info(
-            "LLM 요청 전송 messages=%s tools=%s endpoint=%s",
-            json.dumps(safe_messages, ensure_ascii=False),
-            json.dumps(tool_names, ensure_ascii=False),
-            endpoint,
-        )
+        if log_verbose:
+            safe_messages = _sanitize_messages(prepared_messages)
+            tool_names = _extract_tool_names(tools or [])
+            logger.info(
+                "LLM 요청 전송 messages=%s tools=%s endpoint=%s",
+                json.dumps(safe_messages, ensure_ascii=False),
+                json.dumps(tool_names, ensure_ascii=False),
+                endpoint,
+            )
+        else:
+            logger.info(
+                "LLM 요청 전송 message_count=%d tool_count=%d endpoint=%s",
+                len(prepared_messages),
+                len(tools or []),
+                endpoint,
+            )
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -155,7 +164,8 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
                     len(tools or []),
                     endpoint,
                 )
-                logger.info("LLM raw 응답=%s", json.dumps(data, ensure_ascii=False))
+                if log_verbose:
+                    logger.info("LLM raw 응답=%s", json.dumps(data, ensure_ascii=False))
                 return data
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
