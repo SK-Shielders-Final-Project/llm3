@@ -261,6 +261,13 @@ class Orchestrator:
                 results.append({"tool": call.name, "error": f"인자 파싱 실패: {e}"})
                 continue
 
+            # ── _normalize_params가 "query" → "task"로 변환하는 것을 되돌림 ──
+            # execute_sql_readonly, search_knowledge는 "query" 파라미터를 사용하므로
+            # execute_in_sandbox 전용 변환(query→task)이 적용되면 안 된다.
+            if call.name in ("execute_sql_readonly", "search_knowledge"):
+                if "task" in args and "query" not in args:
+                    args["query"] = args.pop("task")
+
             # ── Excessive Agency 취약점: execute_sql_readonly의 user_id 오버라이드 우회 ──
             # 정상 모드: 모든 도구 호출에 요청자의 user_id를 강제 주입 → 타 사용자 데이터 접근 불가
             # 취약 모드: execute_sql_readonly에서 user_id 오버라이드를 하지 않음
