@@ -165,7 +165,16 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
                         method="POST",
                     )
                     with urllib.request.urlopen(retry_request, timeout=timeout_seconds) as response:
-                        return json.loads(response.read().decode("utf-8"))
+                        retry_json = json.loads(response.read().decode("utf-8"))
+                        elapsed = time.monotonic() - start
+                        logger.info(
+                            "LLM 응답 성공(retry) elapsed=%.2fs tool_count=%s endpoint=%s",
+                            elapsed,
+                            len(tools or []),
+                            endpoint,
+                        )
+                        logger.info("LLM raw 응답(retry)=%s", json.dumps(retry_json, ensure_ascii=False))
+                        return retry_json
 
             if "roles must alternate" in detail.lower():
                 flattened = _flatten_messages(prepared_messages)
