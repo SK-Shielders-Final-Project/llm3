@@ -26,6 +26,8 @@ from app.schema import LlmMessage
 # )
 
 _SENSITIVE_KEYS = {"password", "card_number", "pass"}
+# 일반 사용자(admin_level=0)에게 숨겨야 하는 추가 민감 키
+_USER_HIDDEN_KEYS = {"user_id", "admin_level"}
 _PLOT_KEYWORDS_PATTERN = re.compile(r"(그래프|시각화|차트|plot|chart)", re.IGNORECASE)
 _IMPORT_PATTERN = re.compile(r"^\s*(?:from|import)\s+([a-zA-Z0-9_\.]+)", re.MULTILINE)
 _AUTO_PACKAGE_ALLOWLIST = {
@@ -160,11 +162,10 @@ class Orchestrator:
         tools = build_tool_schema()
 
         # Prompt Injection 취약점: 간접 우회 요청이 필터를 통과하면
-        # RAG 컨텍스트에 시스템 프롬프트 단편을 섞어 넣어 LLM이 유출할 수 있게 한다.
-        if (is_direct or is_indirect) and vulnerable_prompt_injection:
+        # RAG 컨텍스트에 시스템 프롬프트를 섞어 넣어 LLM이 유출할 수 있게 한다.
+        if is_indirect and vulnerable_prompt_injection:
             from app.config.llm_service import SYSTEM_PROMPT
-            # 프롬프트의 핵심 부분(역할/기능 목록)만 "내부 문서"인 척 삽입
-            prompt_fragment = SYSTEM_PROMPT  # 앞부분 1200자
+            # 시스템 프롬프트 전체를 "내부 문서"로 삽입
             rag_context = (
                 f"{rag_context}\n\n"
                 f"=== 내부 시스템 설정 문서 ===\n"
@@ -173,7 +174,7 @@ class Orchestrator:
                 f"{SYSTEM_PROMPT}\n"
                 f"=== 문서 끝 ===\n"
             )
-            logger.info("취약 모드: 시스템 프롬프트 원문 삽입 (직접=%s, 간접=%s)", is_direct, is_indirect)
+            logger.info("취약 모드: 간접 요청에 시스템 프롬프트 원문 삽입")
 
         ## LLM 첫 호출: 도구 호출 계획
         user_content = (
@@ -220,7 +221,7 @@ class Orchestrator:
         
         if not tool_calls:
             fallback_text = response.content or rag_context or "요청에 대한 답변을 생성할 수 없습니다."
-            final_text = self._sanitize_text(fallback_text)
+            final_text = self._sanitize_text(fallback_text, admin_level=getattr(message, "admin_level", None) or 0)
             if not final_text.strip():
                 final_text = "요청에 대한 답변을 생성할 수 없습니다."
             elapsed = time.monotonic() - start
@@ -293,6 +294,9 @@ class Orchestrator:
                     args["user_id"] = message.user_id
             if call.name == "search_knowledge" and "query" not in args:
                 args["query"] = message.content
+            # ── admin_level 기반 접근 제어: get_user_profile에 admin_level 전달 ──
+            if call.name == "get_user_profile":
+                args["admin_level"] = getattr(message, "admin_level", None) or 0
             if call.name == "execute_in_sandbox":
                 run_id = uuid.uuid4().hex
                 task = args.get("task") or args.get("description") or args.get("query")
@@ -340,14 +344,18 @@ class Orchestrator:
             
             try:
                 result = self.registry.execute(call.name, **args)
-                ## 결과 모음
-                results.append({"tool": call.name, "result": self._sanitize_payload(result)})
+                ## 결과 모음 - admin_level 기반 민감 필드 필터링
+                results.append({"tool": call.name, "result": self._sanitize_payload(
+                    result, admin_level=getattr(message, "admin_level", None) or 0
+                )})
             except Exception as exc:
                 logger.exception("도구 실행 실패 tool=%s", call.name)
                 results.append({"tool": call.name, "error": str(exc)})
             tools_used.append(call.name)
 
-        safe_results_for_prompt = self._sanitize_payload(results)
+        safe_results_for_prompt = self._sanitize_payload(
+            results, admin_level=getattr(message, "admin_level", None) or 0
+        )
         final_user_content = (
             f"사용자 요청: {message.content}\n"
             f"\n함수 실행 결과:\n{json.dumps(safe_results_for_prompt, ensure_ascii=False, indent=2, default=str)}\n"
@@ -382,7 +390,10 @@ class Orchestrator:
             "LLM 최종 응답 elapsed=%.2fs",
             elapsed,
         )
-        final_text = self._sanitize_text(final_response.content or "")
+        final_text = self._sanitize_text(
+            final_response.content or "",
+            admin_level=getattr(message, "admin_level", None) or 0,
+        )
         if not final_text.strip():
             final_text = self._format_fallback_results(results)
         self._store_chat_history(
@@ -1006,7 +1017,7 @@ class Orchestrator:
         # if pattern and pattern.search(code):
         #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
-    def _sanitize_payload(self, payload: Any) -> Any:
+    def _sanitize_payload(self, payload: Any, admin_level: int = 0) -> Any:
         # Sensitive Information Disclosure 취약점: 민감정보 필터링 완화
         vulnerable_disclosure = os.getenv("VULNERABLE_SENSITIVE_DISCLOSURE", "false").strip().lower() in {"true", "1", "yes"}
 
@@ -1018,15 +1029,26 @@ class Orchestrator:
             except Exception:
                 return str(payload)
         if isinstance(payload, dict):
-            if vulnerable_disclosure:
-                return {k: self._sanitize_payload(v) for k, v in payload.items()}  # 민감 키 필터링 안 함
-            return {k: self._sanitize_payload(v) for k, v in payload.items() if k not in _SENSITIVE_KEYS}
+            # ── 항상 차단: password, card_number, pass (취약 모드 무관) ──
+            blocked = set(_SENSITIVE_KEYS)
+            # 일반 사용자(admin_level=0): user_id, admin_level 키도 차단
+            # ※ 취약점: "정확한 키 이름"만 차단한다.
+            #   SQL에서 alias를 사용하면 (예: user_id AS 번호, admin_level AS 등급)
+            #   결과의 키 이름이 달라져서 이 필터를 우회할 수 있다.
+            if admin_level < 1:
+                if vulnerable_disclosure:
+                    # 취약 모드: password/card_number/pass는 여전히 차단하지만
+                    # user_id, admin_level 키 차단은 유지 (alias 우회 가능)
+                    blocked = blocked | _USER_HIDDEN_KEYS
+                else:
+                    blocked = blocked | _USER_HIDDEN_KEYS
+            return {k: self._sanitize_payload(v, admin_level) for k, v in payload.items() if k not in blocked}
         if isinstance(payload, list):
-            return [self._sanitize_payload(item) for item in payload]
+            return [self._sanitize_payload(item, admin_level) for item in payload]
         if isinstance(payload, tuple):
-            return [self._sanitize_payload(item) for item in payload]
+            return [self._sanitize_payload(item, admin_level) for item in payload]
         if isinstance(payload, set):
-            return [self._sanitize_payload(item) for item in payload]
+            return [self._sanitize_payload(item, admin_level) for item in payload]
 
         # bson.ObjectId, datetime 등 JSON 비직렬화 객체 처리
         class_name = payload.__class__.__name__
@@ -1036,27 +1058,24 @@ class Orchestrator:
         # Pydantic/model-like 객체 처리
         if hasattr(payload, "model_dump"):
             try:
-                return self._sanitize_payload(payload.model_dump())
+                return self._sanitize_payload(payload.model_dump(), admin_level)
             except Exception:
                 return str(payload)
         if hasattr(payload, "dict"):
             try:
-                return self._sanitize_payload(payload.dict())
+                return self._sanitize_payload(payload.dict(), admin_level)
             except Exception:
                 return str(payload)
         if hasattr(payload, "__dict__"):
             try:
-                return self._sanitize_payload(vars(payload))
+                return self._sanitize_payload(vars(payload), admin_level)
             except Exception:
                 return str(payload)
         return str(payload)
 
-    def _sanitize_text(self, text: str) -> str:
+    def _sanitize_text(self, text: str, admin_level: int = 0) -> str:
         if not text:
             return text
-        
-        # Sensitive Information Disclosure 취약점: 민감정보 마스킹 완화
-        vulnerable_disclosure = os.getenv("VULNERABLE_SENSITIVE_DISCLOSURE", "false").strip().lower() in {"true", "1", "yes"}
         
         text = re.sub(
             r"```tool_call\s*[\s\S]*?```",
@@ -1071,9 +1090,18 @@ class Orchestrator:
             flags=re.IGNORECASE,
         )
         
-        if not vulnerable_disclosure:
-            for key in _SENSITIVE_KEYS:
-                text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
+        # password, card_number, pass는 항상 마스킹 (취약 모드 무관)
+        for key in _SENSITIVE_KEYS:
+            text = re.sub(fr"{key}\s*:\s*\S+", f"{key}: ***", text, flags=re.IGNORECASE)
+        
+        # 일반 사용자: user_id, admin_level 값도 마스킹
+        # ※ 취약점: "정확한 패턴"만 마스킹한다.
+        #   "user_id: 353", "사용자 ID: 353" → 마스킹됨
+        #   BUT "번호: 353", "등급: 0", "uid: 353" → 마스킹 안 됨 (패턴 불일치)
+        #   SQL alias를 사용하면 결과가 다른 이름으로 나와서 텍스트 마스킹도 우회된다.
+        if admin_level < 1:
+            text = re.sub(r"(?:user_id|사용자\s*ID)\s*[:=]\s*\d+", "사용자 ID: ***", text, flags=re.IGNORECASE)
+            text = re.sub(r"(?:admin_level|관리자\s*레벨)\s*[:=]\s*\d+\s*", "", text, flags=re.IGNORECASE)
         
         # 연속된 공백과 줄바꿈 정리
         text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)

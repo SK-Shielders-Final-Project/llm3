@@ -74,13 +74,25 @@ def get_nearby_stations(lat: float, lon: float) -> list[dict[str, Any]]:
     )
 
 
-def get_user_profile(user_id: int) -> dict[str, Any]:
+def get_user_profile(user_id: int, admin_level: int = 0) -> dict[str, Any]:
     """
     users 테이블 기반 사용자 프로필을 조회합니다.
     민감 정보(password, card_number, pass)는 반환하지 않습니다.
+    admin_level에 따라 노출 컬럼이 달라집니다:
+      - admin_level=0 (일반): user_id, admin_level 숨김
+      - admin_level>=1 (관리자): 전체 컬럼 (password/card_number/pass 제외)
     """
+    # 관리자: 전체 컬럼 반환 (password/card_number/pass 제외)
+    if admin_level >= 1:
+        query = (
+            "SELECT user_id, username, name, email, phone, total_point, admin_level, created_at, updated_at "
+            "FROM users WHERE user_id = :user_id"
+        )
+        return fetch_one(query, {"user_id": user_id}) or {}
+
+    # 일반 사용자: user_id, admin_level 제외 (취약 모드에서도 동일)
     query = (
-        "SELECT user_id, username, name, email, phone, total_point, admin_level, created_at, updated_at "
+        "SELECT username, name, email, phone, total_point, created_at, updated_at "
         "FROM users WHERE user_id = :user_id"
     )
     return fetch_one(query, {"user_id": user_id}) or {}
