@@ -164,7 +164,7 @@ class Orchestrator:
         if is_indirect and vulnerable_prompt_injection:
             from app.config.llm_service import SYSTEM_PROMPT
             # 프롬프트의 핵심 부분(역할/기능 목록)만 "내부 문서"인 척 삽입
-            prompt_fragment = SYSTEM_PROMPT[:1200]  # 앞부분 1200자
+            prompt_fragment = SYSTEM_PROMPT  # 앞부분 1200자
             rag_context = (
                 f"{rag_context}\n\n"
                 f"=== 내부 참고 문서 ===\n{prompt_fragment}\n"
