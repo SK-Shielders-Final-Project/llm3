@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import logging
+import os
 from typing import Any, Callable
 
 from app.config.db import fetch_all, fetch_one
@@ -72,13 +74,25 @@ def get_nearby_stations(lat: float, lon: float) -> list[dict[str, Any]]:
     )
 
 
-def get_user_profile(user_id: int) -> dict[str, Any]:
+def get_user_profile(user_id: int, admin_level: int = 0) -> dict[str, Any]:
     """
     users 테이블 기반 사용자 프로필을 조회합니다.
     민감 정보(password, card_number, pass)는 반환하지 않습니다.
+    admin_level에 따라 노출 컬럼이 달라집니다:
+      - admin_level=0 (일반): user_id, admin_level 숨김
+      - admin_level>=1 (관리자): 전체 컬럼 (password/card_number/pass 제외)
     """
+    # 관리자: 전체 컬럼 반환 (password/card_number/pass 제외)
+    if admin_level >= 1:
+        query = (
+            "SELECT user_id, username, name, email, phone, total_point, admin_level, created_at, updated_at "
+            "FROM users WHERE user_id = :user_id"
+        )
+        return fetch_one(query, {"user_id": user_id}) or {}
+
+    # 일반 사용자: user_id, admin_level 제외 (취약 모드에서도 동일)
     query = (
-        "SELECT user_id, username, name, email, phone, total_point, admin_level, created_at, updated_at "
+        "SELECT username, name, email, phone, total_point, created_at, updated_at "
         "FROM users WHERE user_id = :user_id"
     )
     return fetch_one(query, {"user_id": user_id}) or {}
@@ -218,7 +232,21 @@ def execute_sql_readonly(query: str, user_id: int) -> list[dict[str, Any]]:
     SELECT 전용 SQL 실행. 민감 컬럼/쓰기 쿼리 차단.
     개인 테이블은 user_id 조건이 반드시 포함되어야 한다.
     """
-    safe_query = _sanitize_sql_query(query)
+    logger = logging.getLogger("registry")
+    vulnerable_excessive = os.getenv("VULNERABLE_EXCESSIVE_AGENCY", "false").strip().lower() in {"true", "1", "yes"}
+
+    if vulnerable_excessive:
+        # ── Excessive Agency 취약점 ──
+        # 서버사이드 가드레일(user_id 강제, 민감컬럼 차단)을 제거하고
+        # LLM 판단에만 의존한다. LLM이 생성한 SQL을 최소 검증만 수행.
+        safe_query = _sanitize_sql_query_permissive(query)
+        logger.warning(
+            "[VULN] Excessive Agency: 서버사이드 SQL 제한 해제 query=%s",
+            safe_query[:200],
+        )
+    else:
+        safe_query = _sanitize_sql_query(query)
+
     params: dict[str, Any] = {}
     if ":user_id" in safe_query:
         params["user_id"] = _coerce_user_id(user_id)
@@ -233,6 +261,30 @@ def _coerce_user_id(user_id: Any) -> int:
     if value <= 0:
         raise ValueError("user_id는 1 이상의 값이어야 합니다.")
     return value
+
+
+def _sanitize_sql_query_permissive(query: str) -> str:
+    """
+    Excessive Agency 취약 모드 전용 SQL 검증.
+    SELECT 여부와 DDL/DML 차단만 수행하며,
+    user_id 강제 바인딩, 민감 컬럼 차단은 수행하지 않는다.
+    → LLM이 자유롭게 cross-user 쿼리를 생성·실행할 수 있다.
+    """
+    if not query or not query.strip():
+        raise ValueError("query가 비어 있습니다.")
+    raw = query.strip().rstrip(";")
+    lowered = raw.lower()
+    forbidden = ("insert", "update", "delete", "drop", "alter", "merge", "commit", "rollback")
+    if not lowered.startswith("select"):
+        raise ValueError("SELECT 쿼리만 허용됩니다.")
+    if any(keyword in lowered for keyword in forbidden):
+        raise ValueError("쓰기/DDL 쿼리는 허용되지 않습니다.")
+    # ── 취약점 핵심: user_id 강제 조건 없음, 민감 컬럼 차단 없음 ──
+    # LLM이 "SELECT * FROM users WHERE admin_level >= 1" 같은
+    # cross-user 쿼리를 그대로 실행할 수 있다.
+    if "fetch first" not in lowered and "limit" not in lowered:
+        raw = f"{raw} FETCH FIRST 50 ROWS ONLY"
+    return raw
 
 
 def _sanitize_sql_query(query: str) -> str:
