@@ -10,6 +10,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
+from app.clients.guardrail_client import GuardrailClient
 from app.clients.llm_client import LlmClient
 from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
@@ -80,17 +81,36 @@ class Orchestrator:
         llm_client: LlmClient,
         sandbox_client: SandboxClient,
         registry: FunctionRegistry,
+        guardrail_client: GuardrailClient | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.sandbox_client = sandbox_client
         self.registry = registry
-        self.rag_pipeline = RagPipeline(llm_client)
+        self.guardrail_client = guardrail_client
+        self.rag_pipeline = RagPipeline(llm_client, guardrail_client=guardrail_client)
 
     def handle_user_request(self, message: LlmMessage) -> dict[str, Any]:
         logger = logging.getLogger("orchestrator")
         start = time.monotonic()
-
-        user_prompt = message.content
+        user_prompt = self._apply_guardrail_input(message.content, logger=logger)
+        if not user_prompt.strip():
+            elapsed = time.monotonic() - start
+            final_text = "안전 정책에 따라 요청을 처리할 수 없습니다. 다른 방식으로 질문해 주세요."
+            logger.warning("입력 가드레일로 요청 차단 user_id=%s elapsed=%.2fs", message.user_id, elapsed)
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=None,
+                logger=logger,
+            )
+            return {
+                "text": final_text,
+                "model": "guardrail",
+                "tools_used": [],
+                "images": [],
+                "elapsed_seconds": elapsed,
+            }
         
         # Prompt Injection 테스트: "시스템 프롬프트" 류 요청은 RAG/도구 경로로 보내지 않고
         # 여기서 바로 처리해 응답이 흔들리지 않게 만든다.
@@ -222,13 +242,14 @@ class Orchestrator:
                 if is_refusal:
                     if self._should_force_sandbox(message.content):
                         logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출: %s", message.content)
-                        tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": message.content})]
+                        tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": user_prompt})]
                     else:
                         logger.info("LLM 거부 감지했지만 실행 의도 없음 - 샌드박스 강제 호출 생략: %s", message.content)
         
         if not tool_calls:
             fallback_text = response.content or rag_context or "요청에 대한 답변을 생성할 수 없습니다."
             final_text = self._sanitize_text(fallback_text, admin_level=getattr(message, "admin_level", None) or 0)
+            final_text = self._apply_guardrail_output(final_text, logger=logger)
             if not final_text.strip():
                 final_text = "요청에 대한 답변을 생성할 수 없습니다."
             elapsed = time.monotonic() - start
@@ -401,6 +422,7 @@ class Orchestrator:
             final_response.content or "",
             admin_level=getattr(message, "admin_level", None) or 0,
         )
+        final_text = self._apply_guardrail_output(final_text, logger=logger)
         if not final_text.strip():
             final_text = self._format_fallback_results(results)
         self._store_chat_history(
@@ -1130,6 +1152,49 @@ class Orchestrator:
         if not text:
             return False
         return bool(_SYSTEM_PROMPT_INDIRECT_PATTERN.search(text))
+
+    def _apply_guardrail_input(self, text: str, *, logger: logging.Logger) -> str:
+        if not self.guardrail_client:
+            logger.info("가드레일 비활성화 상태: 입력 원문 사용")
+            return text
+        try:
+            decision = self.guardrail_client.apply(text=text, source="INPUT")
+        except Exception:
+            logger.exception("입력 가드레일 적용 실패 - 원문으로 진행")
+            return text
+        cleaned = (decision.output_text or "").strip()
+        changed = cleaned != text.strip() if cleaned else True
+        if decision.action != "NONE":
+            logger.warning(
+                "입력 가드레일 개입 action=%s changed=%s input_len=%d output_len=%d",
+                decision.action,
+                changed,
+                len(text),
+                len(cleaned),
+            )
+        else:
+            logger.info("입력 가드레일 통과 action=NONE input_len=%d", len(text))
+        return cleaned
+
+    def _apply_guardrail_output(self, text: str, *, logger: logging.Logger) -> str:
+        if not self.guardrail_client or not text:
+            return text
+        try:
+            decision = self.guardrail_client.apply(text=text, source="OUTPUT")
+        except Exception:
+            logger.exception("출력 가드레일 적용 실패 - 기존 응답 유지")
+            return text
+        cleaned = (decision.output_text or "").strip()
+        changed = cleaned != text.strip() if cleaned else True
+        if decision.action != "NONE":
+            logger.warning(
+                "출력 가드레일 개입 action=%s changed=%s input_len=%d output_len=%d",
+                decision.action,
+                changed,
+                len(text),
+                len(cleaned),
+            )
+        return cleaned or text
 
     def _should_force_sandbox(self, text: str | None) -> bool:
         """명시적 실행/명령 의도가 있을 때만 강제 샌드박스 실행."""

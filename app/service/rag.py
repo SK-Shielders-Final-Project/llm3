@@ -711,14 +711,22 @@ class RagPipeline:
     def _apply_guardrail_input(self, text: str) -> str:
         if not self.guardrail_client:
             return text
-        decision = self.guardrail_client.apply(text=text, source="INPUT")
+        try:
+            decision = self.guardrail_client.apply(text=text, source="INPUT")
+        except Exception:
+            logger.exception("RAG 입력 가드레일 적용 실패 - 원문 유지")
+            return text
         cleaned = (decision.output_text or "").strip()
         return cleaned or text
 
     def _apply_guardrail_output(self, text: str) -> str:
         if not self.guardrail_client:
             return text
-        decision = self.guardrail_client.apply(text=text, source="OUTPUT")
+        try:
+            decision = self.guardrail_client.apply(text=text, source="OUTPUT")
+        except Exception:
+            logger.exception("RAG 출력 가드레일 적용 실패 - 원문 유지")
+            return text
         cleaned = (decision.output_text or "").strip()
         return cleaned or text
 

@@ -34,18 +34,31 @@ class GuardrailClient:
                 }
             }
         ]
-        response = self._client.apply_guardrail(
-            guardrailIdentifier=self._identifier,
-            guardrailVersion=self._version,
-            source=source,
-            content=payload,
-        )
+        try:
+            response = self._client.apply_guardrail(
+                guardrailIdentifier=self._identifier,
+                guardrailVersion=self._version,
+                source=source,
+                content=payload,
+            )
+        except Exception:
+            self._logger.exception(
+                "Guardrail apply failed source=%s region=%s identifier=%s",
+                source,
+                self._region,
+                self._identifier,
+            )
+            raise
         action = response.get("action", "NONE")
         output_text = _extract_output_text(response) or text
+        changed = (output_text or "").strip() != text.strip()
         self._logger.info(
-            "Guardrail applied source=%s action=%s region=%s identifier=%s",
+            "Guardrail applied source=%s action=%s changed=%s input_len=%d output_len=%d region=%s identifier=%s",
             source,
             action,
+            changed,
+            len(text),
+            len(output_text or ""),
             self._region,
             self._identifier,
         )
@@ -60,6 +73,9 @@ def build_guardrail_client_from_env() -> GuardrailClient | None:
 
     identifier = os.getenv("BEDROCK_GUARDRAIL_IDENTIFIER") or os.getenv("GUARDRAIL_IDENTIFIER")
     if not identifier:
+        logging.getLogger("guardrail_client").warning(
+            "Guardrail enabled but identifier is missing. Set BEDROCK_GUARDRAIL_IDENTIFIER or GUARDRAIL_IDENTIFIER."
+        )
         return None
 
     version = os.getenv("BEDROCK_GUARDRAIL_VERSION", "DRAFT").strip() or "DRAFT"
@@ -67,6 +83,12 @@ def build_guardrail_client_from_env() -> GuardrailClient | None:
         os.getenv("AWS_REGION")
         or os.getenv("BEDROCK_GUARDRAIL_REGION")
         or "ap-northeast-2"
+    )
+    logging.getLogger("guardrail_client").info(
+        "Guardrail client configured enabled=true region=%s version=%s identifier=%s",
+        region,
+        version,
+        identifier,
     )
     return GuardrailClient(identifier=identifier, version=version, region=region)
 
