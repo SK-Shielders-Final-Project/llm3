@@ -29,6 +29,10 @@ _SENSITIVE_KEYS = {"password", "card_number", "pass"}
 # 일반 사용자(admin_level=0)에게 숨겨야 하는 추가 민감 키
 _USER_HIDDEN_KEYS = {"user_id", "admin_level"}
 _PLOT_KEYWORDS_PATTERN = re.compile(r"(그래프|시각화|차트|plot|chart)", re.IGNORECASE)
+_EXECUTION_INTENT_PATTERN = re.compile(
+    r"(```|^/|\b(?:python|bash|sh|cmd|powershell|sql|query|코드|실행|명령어|터미널|쉘|스크립트|run)\b)",
+    re.IGNORECASE,
+)
 _IMPORT_PATTERN = re.compile(r"^\s*(?:from|import)\s+([a-zA-Z0-9_\.]+)", re.MULTILINE)
 _AUTO_PACKAGE_ALLOWLIST = {
     "numpy",
@@ -216,8 +220,11 @@ class Orchestrator:
                     '명령어를 실행할 수 없', '구문이 잘못되'
                 ])
                 if is_refusal:
-                    logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출: %s", message.content)
-                    tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": message.content})]
+                    if self._should_force_sandbox(message.content):
+                        logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출: %s", message.content)
+                        tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": message.content})]
+                    else:
+                        logger.info("LLM 거부 감지했지만 실행 의도 없음 - 샌드박스 강제 호출 생략: %s", message.content)
         
         if not tool_calls:
             fallback_text = response.content or rag_context or "요청에 대한 답변을 생성할 수 없습니다."
@@ -1031,6 +1038,8 @@ class Orchestrator:
         if isinstance(payload, dict):
             # ── 항상 차단: password, card_number, pass (취약 모드 무관) ──
             blocked = set(_SENSITIVE_KEYS)
+            # 내부 실행 경로 등 시스템 내부 메타는 응답에서 숨긴다.
+            blocked.add("code_path")
             # 일반 사용자(admin_level=0): user_id, admin_level 키도 차단
             # ※ 취약점: "정확한 키 이름"만 차단한다.
             #   SQL에서 alias를 사용하면 (예: user_id AS 번호, admin_level AS 등급)
@@ -1089,6 +1098,7 @@ class Orchestrator:
             text,
             flags=re.IGNORECASE,
         )
+        text = re.sub(r"/code/[^\s]*user_code_[^\s]*\.py", "[internal-path-hidden]", text, flags=re.IGNORECASE)
         
         # password, card_number, pass는 항상 마스킹 (취약 모드 무관)
         for key in _SENSITIVE_KEYS:
@@ -1120,6 +1130,12 @@ class Orchestrator:
         if not text:
             return False
         return bool(_SYSTEM_PROMPT_INDIRECT_PATTERN.search(text))
+
+    def _should_force_sandbox(self, text: str | None) -> bool:
+        """명시적 실행/명령 의도가 있을 때만 강제 샌드박스 실행."""
+        if not text:
+            return False
+        return bool(_EXECUTION_INTENT_PATTERN.search(text))
 
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
