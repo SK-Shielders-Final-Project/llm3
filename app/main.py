@@ -13,6 +13,7 @@ load_dotenv(override=True)
 
 from fastapi import FastAPI, HTTPException, Response
 
+from app.clients.guardrail_client import build_guardrail_client_from_env
 from app.clients.llm_client import LlmClient, build_http_completion_func
 from app.clients.sandbox_client import SandboxClient
 from app.orchestrator import Orchestrator
@@ -140,10 +141,16 @@ def create_orchestrator() -> Orchestrator:
 
     sandbox_client = SandboxClient(base_url=sandbox_url, timeout_seconds=sandbox_timeout)
     registry = FunctionRegistry()
+    guardrail_client = build_guardrail_client_from_env()
+    logging.getLogger("main").info(
+        "Guardrail orchestrator binding enabled=%s",
+        guardrail_client is not None,
+    )
     return Orchestrator(
         llm_client=llm_client,
         sandbox_client=sandbox_client,
         registry=registry,
+        guardrail_client=guardrail_client,
     )
 
 
