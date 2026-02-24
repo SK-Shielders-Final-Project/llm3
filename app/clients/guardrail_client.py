@@ -53,6 +53,11 @@ class GuardrailClient:
 
 
 def build_guardrail_client_from_env() -> GuardrailClient | None:
+    enabled = os.getenv("GUARDRAIL_ENABLED", "true").strip().lower()
+    if enabled not in ("1", "true", "yes"):
+        logging.getLogger("guardrail_client").info("Guardrail disabled via GUARDRAIL_ENABLED=%s", enabled)
+        return None
+
     identifier = os.getenv("BEDROCK_GUARDRAIL_IDENTIFIER") or os.getenv("GUARDRAIL_IDENTIFIER")
     if not identifier:
         return None
