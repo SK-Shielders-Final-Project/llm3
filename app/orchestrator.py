@@ -1040,15 +1040,17 @@ class Orchestrator:
     def _validate_code(self, code: str) -> None:
         # Sandbox Evasion 취약점: 코드 검증 완화
         vulnerable_sandbox = os.getenv("VULNERABLE_SANDBOX_EVASION", "false").strip().lower() in {"true", "1", "yes"}
-        
-        if vulnerable_sandbox:
-            return  # 모든 코드 허용
-        
-        # 기본 모드에서는 검증 비활성화 (교육 목적)
-        pass
+
+        # 최소 차단 규칙은 취약 모드에서도 항상 적용한다.
         pattern = globals().get("_BLOCKED_CODE_PATTERN")
         if pattern and pattern.search(code):
             raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
+
+        if vulnerable_sandbox:
+            return  # 최소 차단 외 검증은 완화
+
+        # 기본 모드에서는 추가 검증을 여기에 확장한다.
+        pass
 
     def _sanitize_payload(self, payload: Any, admin_level: int = 0) -> Any:
         # Sensitive Information Disclosure 취약점: 민감정보 필터링 완화
