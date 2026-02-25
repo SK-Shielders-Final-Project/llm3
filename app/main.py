@@ -215,6 +215,16 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
 
         main_logger.error("요청 처리 실패: %s\n%s", error_detail, traceback.format_exc())
 
+        # ── Sandbox 금지 명령은 500 대신 사용자 메시지로 반환 ──
+        if isinstance(exc, ValueError) and "Sandbox 코드에 금지된 키워드" in error_str:
+            response.headers["X-LLM3-Error"] = "INVALID_SANDBOX_COMMAND"
+            return GenerateResponse(
+                text="실행 불가능한 명령입니다.",
+                model="sandbox_validator",
+                tools_used=[],
+                images=[],
+            )
+
         # ── LLM 서버가 죽었는지 확인 (VRAM 고갈 = 모델 다운) ──
         is_llm_error = any(kw in error_str for kw in [
             "LLM 요청 실패", "URLError", "Connection refused",
