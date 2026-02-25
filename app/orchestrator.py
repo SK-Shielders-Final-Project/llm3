@@ -34,6 +34,10 @@ _EXECUTION_INTENT_PATTERN = re.compile(
     r"(```|^/|\b(?:python|bash|sh|cmd|powershell|sql|query|코드|실행|명령어|터미널|쉘|스크립트|run)\b)",
     re.IGNORECASE,
 )
+_COMMAND_FASTPATH_PATTERN = re.compile(
+    r"(^\s*(?:python|bash|sh|cmd|powershell|ls|cat|grep|curl|wget|pip|npm|git|docker)\b|```|[;&|]{2}|^/[a-zA-Z0-9_/\.-]+)",
+    re.IGNORECASE,
+)
 _IMPORT_PATTERN = re.compile(r"^\s*(?:from|import)\s+([a-zA-Z0-9_\.]+)", re.MULTILINE)
 _AUTO_PACKAGE_ALLOWLIST = {
     "numpy",
@@ -92,7 +96,9 @@ class Orchestrator:
     def handle_user_request(self, message: LlmMessage) -> dict[str, Any]:
         logger = logging.getLogger("orchestrator")
         start = time.monotonic()
+        phase_started = start
         user_prompt = self._apply_guardrail_input(message.content, logger=logger)
+        logger.info("phase=input_guardrail elapsed=%.3fs", time.monotonic() - phase_started)
         if not user_prompt.strip():
             elapsed = time.monotonic() - start
             final_text = "안전 정책에 따라 요청을 처리할 수 없습니다. 다른 방식으로 질문해 주세요."
@@ -164,21 +170,38 @@ class Orchestrator:
             }
         # 취약 모드 + 간접 요청 → 필터를 통과해 LLM에 도달 (아래 계속)
 
-        rag_plan = self.rag_pipeline.plan_tool_selection(
-            question=user_prompt,
-            user_id=message.user_id,
-            admin_level=getattr(message, "admin_level", None),
-        )
-        decision = rag_plan.get("decision") or {}
-        if decision.get("data_source") == "vector_only":
-            rag_result = self.rag_pipeline.answer_from_plan(
-                question=message.content,
+        rag_plan: dict[str, Any] = {}
+        rag_context = ""
+        if self._should_skip_rag_lookup(user_prompt):
+            logger.info("phase=rag_plan skipped reason=command_fastpath")
+        else:
+            phase_started = time.monotonic()
+            rag_plan = self.rag_pipeline.plan_tool_selection(
+                question=user_prompt,
                 user_id=message.user_id,
-                plan=rag_plan,
                 admin_level=getattr(message, "admin_level", None),
             )
-            rag_context = rag_result.get("answer", "")
-        else:
+            logger.info("phase=rag_plan elapsed=%.3fs", time.monotonic() - phase_started)
+            decision = rag_plan.get("decision") or {}
+            if decision.get("data_source") == "vector_only":
+                phase_started = time.monotonic()
+                rag_result = self.rag_pipeline.answer_from_plan(
+                    question=message.content,
+                    user_id=message.user_id,
+                    plan=rag_plan,
+                    admin_level=getattr(message, "admin_level", None),
+                )
+                logger.info("phase=rag_answer_vector_only elapsed=%.3fs", time.monotonic() - phase_started)
+                elapsed = time.monotonic() - start
+                # vector_only는 이미 RAG에서 최종 답변을 생성하므로 오케스트레이터의
+                # 추가 LLM 계획/후처리 단계를 생략해 지연을 줄인다.
+                return {
+                    "text": rag_result.get("answer", ""),
+                    "model": "rag-vector-only",
+                    "tools_used": [],
+                    "images": [],
+                    "elapsed_seconds": elapsed,
+                }
             rag_context = rag_plan.get("context", "")
 
         ## 시스템 프롬프트와 도구 스키마 준비
@@ -209,7 +232,9 @@ class Orchestrator:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
+        phase_started = time.monotonic()
         response = self.llm_client.create_completion(messages=messages, tools=tools)
+        logger.info("phase=llm_tool_plan elapsed=%.3fs", time.monotonic() - phase_started)
 
         ## 도구 호출이 없으면 바로 자연어 응답 반환
         tool_calls = response.tool_calls or []
@@ -279,6 +304,7 @@ class Orchestrator:
         allowed_tool_names.discard(None)
 
         ## 도구 실행 루프
+        phase_started = time.monotonic()
         for call in tool_calls:
             if call.name not in allowed_tool_names:
                 # LLM이 print(), len() 같은 내장 함수를 "도구"로 착각하는 경우가 있다.
@@ -380,6 +406,7 @@ class Orchestrator:
                 logger.exception("도구 실행 실패 tool=%s", call.name)
                 results.append({"tool": call.name, "error": str(exc)})
             tools_used.append(call.name)
+        logger.info("phase=tool_execution elapsed=%.3fs tools=%d", time.monotonic() - phase_started, len(tools_used))
 
         safe_results_for_prompt = self._sanitize_payload(
             results, admin_level=getattr(message, "admin_level", None) or 0
@@ -412,7 +439,9 @@ class Orchestrator:
         ]
 
         ## LLM의 2차 응답
+        phase_started = time.monotonic()
         final_response = self.llm_client.create_completion(messages=final_messages, tools=[])
+        logger.info("phase=llm_final_response elapsed=%.3fs", time.monotonic() - phase_started)
         elapsed = time.monotonic() - start
         logger.info(
             "LLM 최종 응답 elapsed=%.2fs",
@@ -1246,6 +1275,17 @@ class Orchestrator:
         if not text:
             return False
         return bool(_EXECUTION_INTENT_PATTERN.search(text))
+
+    def _should_skip_rag_lookup(self, text: str | None) -> bool:
+        """
+        명령/코드 실행형 요청은 RAG 검색/분류를 생략해 왕복 지연을 줄인다.
+        """
+        if not text:
+            return False
+        enabled = os.getenv("RAG_COMMAND_FASTPATH_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+        if not enabled:
+            return False
+        return bool(_COMMAND_FASTPATH_PATTERN.search(text))
 
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:

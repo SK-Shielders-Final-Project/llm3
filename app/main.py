@@ -208,12 +208,16 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     main_logger.info("동시 요청 수: %d (최대: %d)", current_concurrent, _peak_concurrent)
 
     # ── 요청 전 GPU VRAM 상태 기록 (delta 계산용) ──
+    t0 = time.monotonic()
     vram_before = vram_monitor.snapshot()
+    main_logger.info("phase=vram_before_snapshot elapsed=%.3fs", time.monotonic() - t0)
     vram_after: dict[str, Any] | None = None
 
     start = time.monotonic()
     try:
+        t_orch = time.monotonic()
         result = orchestrator.handle_user_request(message)
+        main_logger.info("phase=orchestrator elapsed=%.3fs", time.monotonic() - t_orch)
     except Exception as exc:
         import traceback
         elapsed = time.monotonic() - start
@@ -280,7 +284,9 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
 
         # ── 요청 후 GPU VRAM 상태 로그 ──
         if vram_after is None:
+            t1 = time.monotonic()
             vram_after = vram_monitor.snapshot()
+            main_logger.info("phase=vram_after_snapshot elapsed=%.3fs", time.monotonic() - t1)
         if vram_before and vram_after:
             delta = vram_after["used_mb"] - vram_before["used_mb"]
             main_logger.info(
