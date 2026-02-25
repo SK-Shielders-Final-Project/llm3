@@ -21,8 +21,12 @@ from app.schema import LlmMessage
 
 
 _BLOCKED_CODE_PATTERN = re.compile(
-    r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
-    r"os\.system|__import__|open\(|eval\(|exec\()",
+    r"(\bimport\s+sys\b|\bimport\s+os\b|\bfrom\s+os\s+import\b|"
+    r"\bimport\s+subprocess\b|\bfrom\s+subprocess\s+import\b|"
+    r"\bsocket\b|\brequests\b|\bshutil\b|\brm\s+-rf\b|"
+    r"\bos\.system\b|\bos\.popen\b|\b__import__\b|"
+    r"\bopen\s*\(|\beval\s*\(|\bexec\s*\(|"
+    r"/proc/self|/etc/passwd|\.dockerenv)",
     re.IGNORECASE,
 )
 
