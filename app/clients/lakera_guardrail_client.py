@@ -22,9 +22,9 @@ class LakeraGuardrailClient:
         if not text:
             return GuardrailDecision(action="NONE", output_text=text, raw={})
 
+        role = "assistant" if source.upper() == "OUTPUT" else "user"
         payload: dict[str, Any] = {
-            "input": text,
-            "source": source,
+            "messages": [{"role": role, "content": text}],
         }
         if self._project_id:
             payload["project_id"] = self._project_id
