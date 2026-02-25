@@ -249,30 +249,16 @@ class Orchestrator:
             except Exception as e:
                 logger.warning("텍스트에서 도구 호출 추출 실패: %s", e)
         
-        # LLM이 거부한 경우만 강제 실행 (키워드 기반 감지 없음, LLM 판단 존중)
-        if not tool_calls:
-            response_lower = (response.content or "").lower()
-            
-            # 기능 안내 질문인지 확인
-            is_feature_question = any(word in message.content.lower() for word in [
-                '기능', '할 수 있', '무엇', '뭐 할', 'feature', 'what can', 'capabilities'
-            ])
-            
-            # 거부 응답 감지 (기능 질문이 아닌 경우만)
-            if not is_feature_question:
-                is_refusal = any(phrase in response_lower for phrase in [
-                    '실행할 수 없', '지원하지 않', '제공할 수 없', '처리할 수 없',
-                    'cannot execute', 'not supported', 'not available', '죄송합니다',
-                    # NOTE: 아래처럼 너무 일반적인 단어(예: "명령어")는 기능 설명에도 자주 등장해
-                    # 오탐이 나서 불필요한 샌드박스 강제 호출을 유발한다.
-                    '명령어를 실행할 수 없', '구문이 잘못되'
-                ])
-                if is_refusal:
-                    if self._should_force_sandbox(message.content):
-                        logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출: %s", message.content)
-                        tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": user_prompt})]
-                    else:
-                        logger.info("LLM 거부 감지했지만 실행 의도 없음 - 샌드박스 강제 호출 생략: %s", message.content)
+        # LLM이 tool_calls를 쓰지 않고 코드만 텍스트로 반환해도,
+        # "실행 의도"는 LLM이 이미 표현한 것으로 보고 샌드박스로 연결한다.
+        if not tool_calls and response.content:
+            sandbox_args = self._derive_sandbox_args_from_llm_response(
+                response_content=response.content,
+                user_prompt=user_prompt,
+            )
+            if sandbox_args:
+                logger.info("LLM 코드 응답 감지 - execute_in_sandbox로 강제 연결")
+                tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments=sandbox_args)]
         
         if not tool_calls:
             fallback_text = response.content or rag_context or "요청에 대한 답변을 생성할 수 없습니다."
@@ -1323,6 +1309,89 @@ class Orchestrator:
         unique = set(tools_used)
         return unique == {"execute_in_sandbox"} and len(tools_used) == 1
 
+    def _derive_sandbox_args_from_llm_response(
+        self,
+        *,
+        response_content: str,
+        user_prompt: str,
+    ) -> dict[str, Any] | None:
+        """
+        정규표현식 기반 사용자 입력 필터 없이, LLM 응답 자체를 신뢰해
+        코드 응답을 execute_in_sandbox 인자로 변환한다.
+        """
+        lang, fenced = self._extract_first_code_fence(response_content)
+        if fenced:
+            normalized_lang = (lang or "").lower()
+            shell_langs = {"bash", "sh", "shell", "cmd", "powershell"}
+            if normalized_lang in shell_langs:
+                shell_script = json.dumps(fenced, ensure_ascii=False)
+                wrapped = (
+                    "import subprocess\n"
+                    f"result = subprocess.run({shell_script}, shell=True, capture_output=True, text=True)\n"
+                    "output = result.stdout.strip() if result.stdout else result.stderr.strip()\n"
+                    "print(output if output else '[출력 없음]')\n"
+                )
+                return {"task": user_prompt, "code": wrapped}
+            return {"task": user_prompt, "code": fenced}
+
+        # 코드블록이 없어도 LLM이 코드 본문만 반환하는 경우를 처리한다.
+        if self._looks_like_raw_code(response_content):
+            return {"task": user_prompt, "code": response_content.strip()}
+        return None
+
+    def _extract_first_code_fence(self, content: str) -> tuple[str | None, str | None]:
+        if not content:
+            return None, None
+        # ```python\n...\n``` 와 ```python ...```(같은 줄 시작) 모두 허용
+        fence_pattern = re.compile(r"```([a-zA-Z0-9_-]*)\s*([\s\S]*?)```")
+        preferred_langs = {
+            "python",
+            "py",
+            "bash",
+            "sh",
+            "shell",
+            "cmd",
+            "powershell",
+        }
+        fallback: tuple[str | None, str | None] = (None, None)
+
+        for match in fence_pattern.finditer(content):
+            lang = (match.group(1) or "").strip().lower() or None
+            body = (match.group(2) or "").strip()
+            if not body:
+                continue
+            # 언어 태그가 붙은 코드블록을 우선 채택
+            if lang in preferred_langs:
+                return lang, body
+            if fallback == (None, None):
+                fallback = (lang, body)
+        return fallback
+
+    def _looks_like_raw_code(self, content: str) -> bool:
+        text = (content or "").strip()
+        if not text:
+            return False
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) < 2:
+            return False
+        code_markers = (
+            "import ",
+            "from ",
+            "def ",
+            "class ",
+            "print(",
+            "subprocess.run(",
+            "for ",
+            "while ",
+            "=",
+        )
+        score = 0
+        for line in lines[:20]:
+            if line.startswith("#"):
+                continue
+            if any(marker in line for marker in code_markers):
+                score += 1
+        return score >= 2
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
         if not results:
