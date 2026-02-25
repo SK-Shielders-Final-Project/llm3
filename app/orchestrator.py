@@ -256,6 +256,9 @@ class Orchestrator:
                 response_content=response.content,
                 user_prompt=user_prompt,
             )
+            if not sandbox_args and self._looks_like_execution_payload(response.content):
+                # 코드 추출이 실패해도, LLM이 실행형 응답을 냈다면 샌드박스로 폴백한다.
+                sandbox_args = {"task": user_prompt}
             if sandbox_args:
                 logger.info("LLM 코드 응답 감지 - execute_in_sandbox로 강제 연결")
                 tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments=sandbox_args)]
@@ -1363,6 +1366,30 @@ class Orchestrator:
             if line.startswith("#"):
                 continue
             if any(marker in line for marker in code_markers):
+                score += 1
+        return score >= 2
+
+    def _looks_like_execution_payload(self, content: str) -> bool:
+        text = (content or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        if "```" in lowered:
+            return True
+        markers = (
+            "import ",
+            "subprocess",
+            "os.makedirs",
+            "try:",
+            "except",
+            "print(",
+            "mkdir",
+            "ls ",
+            "/mnt",
+        )
+        score = 0
+        for marker in markers:
+            if marker in lowered:
                 score += 1
         return score >= 2
 
