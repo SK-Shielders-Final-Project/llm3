@@ -129,16 +129,21 @@ class RagPipeline:
         user_id: int,
         plan: dict[str, Any],
         admin_level: int | None = None,
+        apply_input_guardrail: bool = True,
+        apply_output_guardrail: bool = True,
     ) -> dict[str, Any]:
         """
         plan_tool_selection에서 생성된 결과를 재사용해 답변을 만든다.
         vector_only 경로에서 중복 검색/분류를 줄이기 위해 사용한다.
         """
-        guarded_question = self._apply_guardrail_input(question)
+        guarded_question = self._apply_guardrail_input(question) if apply_input_guardrail else question
         intent = plan.get("intent") or {}
         docs = plan.get("vector_docs") or []
         decision = plan.get("decision") or {}
-        resolved_admin = self._resolve_admin_level(user_id, admin_level)
+        if admin_level is not None:
+            resolved_admin = self._resolve_admin_level(user_id, admin_level)
+        else:
+            resolved_admin = int(plan.get("resolved_admin_level", 0) or 0)
 
         mysql_data: dict[str, Any] | None = None
         if decision.get("data_source") in {"mysql_only", "hybrid"}:
@@ -149,7 +154,13 @@ class RagPipeline:
                 decision=decision,
             )
 
-        answer = self._generate_answer(guarded_question, intent, docs, mysql_data)
+        answer = self._generate_answer(
+            guarded_question,
+            intent,
+            docs,
+            mysql_data,
+            apply_output_guardrail=apply_output_guardrail,
+        )
         self._store_conversation(
             user_id=user_id, question=guarded_question, answer=answer, intent=intent
         )
@@ -167,8 +178,9 @@ class RagPipeline:
         user_id: int,
         admin_level: int | None = None,
         top_k: int = 5,
+        apply_input_guardrail: bool = True,
     ) -> dict[str, Any]:
-        guarded_question = self._apply_guardrail_input(question)
+        guarded_question = self._apply_guardrail_input(question) if apply_input_guardrail else question
         admin_level = self._resolve_admin_level(user_id, admin_level)
         intent = self._classify_intent(guarded_question)
         raw_docs = search_knowledge(
@@ -192,6 +204,7 @@ class RagPipeline:
             "manual_docs": manual_docs,
             "tool_allowlist": allowlist,
             "context": context,
+            "resolved_admin_level": admin_level,
         }
 
     def route_only(
@@ -463,6 +476,8 @@ class RagPipeline:
         intent: dict[str, Any],
         docs: list[KnowledgeDocument],
         mysql_data: dict[str, Any] | None,
+        *,
+        apply_output_guardrail: bool = True,
     ) -> str:
         context_parts: list[str] = []
         doc_limit_raw = os.getenv("RAG_CONTEXT_DOCS", "2").strip()
@@ -514,7 +529,7 @@ class RagPipeline:
             tools=[],
         )
         answer = (response.content or "").strip()
-        return self._apply_guardrail_output(answer)
+        return self._apply_guardrail_output(answer) if apply_output_guardrail else answer
 
     def _store_conversation(
         self, user_id: int, question: str, answer: str, intent: dict[str, Any]

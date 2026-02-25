@@ -180,6 +180,7 @@ class Orchestrator:
                 question=user_prompt,
                 user_id=message.user_id,
                 admin_level=getattr(message, "admin_level", None),
+                apply_input_guardrail=False,
             )
             logger.info("phase=rag_plan elapsed=%.3fs", time.monotonic() - phase_started)
             decision = rag_plan.get("decision") or {}
@@ -190,6 +191,8 @@ class Orchestrator:
                     user_id=message.user_id,
                     plan=rag_plan,
                     admin_level=getattr(message, "admin_level", None),
+                    apply_input_guardrail=False,
+                    apply_output_guardrail=True,
                 )
                 logger.info("phase=rag_answer_vector_only elapsed=%.3fs", time.monotonic() - phase_started)
                 elapsed = time.monotonic() - start
@@ -411,6 +414,27 @@ class Orchestrator:
         safe_results_for_prompt = self._sanitize_payload(
             results, admin_level=getattr(message, "admin_level", None) or 0
         )
+        if self._can_skip_final_llm_for_tools(tools_used):
+            elapsed = time.monotonic() - start
+            final_text = self._format_fallback_results(safe_results_for_prompt)
+            final_text = self._sanitize_text(final_text, admin_level=getattr(message, "admin_level", None) or 0)
+            final_text = self._apply_guardrail_output(final_text, logger=logger)
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=rag_plan.get("intent"),
+                logger=logger,
+            )
+            logger.info("phase=llm_final_response skipped reason=tool_fastpath elapsed=%.3fs", elapsed)
+            return {
+                "text": final_text,
+                "model": "tool-fastpath",
+                "tools_used": tools_used,
+                "images": [],
+                "elapsed_seconds": elapsed,
+            }
+
         final_user_content = (
             f"사용자 요청: {message.content}\n"
             f"\n함수 실행 결과:\n{json.dumps(safe_results_for_prompt, ensure_ascii=False, indent=2, default=str)}\n"
@@ -1286,6 +1310,18 @@ class Orchestrator:
         if not enabled:
             return False
         return bool(_COMMAND_FASTPATH_PATTERN.search(text))
+
+    def _can_skip_final_llm_for_tools(self, tools_used: list[str]) -> bool:
+        """
+        단일 샌드박스 실행 결과는 최종 LLM 재요약을 생략해 지연을 줄인다.
+        """
+        if not tools_used:
+            return False
+        enabled = os.getenv("TOOL_FASTPATH_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+        if not enabled:
+            return False
+        unique = set(tools_used)
+        return unique == {"execute_in_sandbox"} and len(tools_used) == 1
 
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
