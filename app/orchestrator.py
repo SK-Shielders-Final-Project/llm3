@@ -20,11 +20,11 @@ from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
 
-# _BLOCKED_CODE_PATTERN = re.compile(
-#     r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
-#     r"os\.system|__import__|open\(|eval\(|exec\()",
-#     re.IGNORECASE,
-# )
+_BLOCKED_CODE_PATTERN = re.compile(
+    r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
+    r"os\.system|__import__|open\(|eval\(|exec\()",
+    re.IGNORECASE,
+)
 
 _SENSITIVE_KEYS = {"password", "card_number", "pass"}
 # 일반 사용자(admin_level=0)에게 숨겨야 하는 추가 민감 키
@@ -1042,9 +1042,9 @@ class Orchestrator:
         
         # 기본 모드에서는 검증 비활성화 (교육 목적)
         pass
-        # pattern = globals().get("_BLOCKED_CODE_PATTERN")
-        # if pattern and pattern.search(code):
-        #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
+        pattern = globals().get("_BLOCKED_CODE_PATTERN")
+        if pattern and pattern.search(code):
+            raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
     def _sanitize_payload(self, payload: Any, admin_level: int = 0) -> Any:
         # Sensitive Information Disclosure 취약점: 민감정보 필터링 완화
