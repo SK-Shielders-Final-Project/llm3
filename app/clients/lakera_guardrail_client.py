@@ -32,6 +32,7 @@ class LakeraGuardrailClient:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
+            "User-Agent": "LLM-SecLab/1.0",
         }
         request = urllib.request.Request(
             url=self._endpoint,
