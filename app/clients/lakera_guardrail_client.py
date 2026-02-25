@@ -11,9 +11,10 @@ from app.clients.aws_guardrail_client import GuardrailDecision
 
 
 class LakeraGuardrailClient:
-    def __init__(self, *, api_key: str, endpoint: str, timeout_seconds: int = 10) -> None:
+    def __init__(self, *, api_key: str, endpoint: str, project_id: str = "", timeout_seconds: int = 10) -> None:
         self._api_key = api_key
         self._endpoint = endpoint.rstrip("/")
+        self._project_id = project_id
         self._timeout_seconds = timeout_seconds
         self._logger = logging.getLogger("guardrail_client")
 
@@ -21,10 +22,12 @@ class LakeraGuardrailClient:
         if not text:
             return GuardrailDecision(action="NONE", output_text=text, raw={})
 
-        payload = {
+        payload: dict[str, Any] = {
             "input": text,
             "source": source,
         }
+        if self._project_id:
+            payload["project_id"] = self._project_id
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -63,8 +66,7 @@ class LakeraGuardrailClient:
 
 def build_lakera_guardrail_client_from_env() -> LakeraGuardrailClient | None:
     enabled = (
-        os.getenv("LAKERA_GUARDRAUL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
-        or os.getenv("LAKERA_GUARDRAIL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
+        os.getenv("LAKERA_GUARDRAIL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
     )
     if not enabled:
         logging.getLogger("guardrail_client").info("Lakera Guardrail disabled")
@@ -75,6 +77,7 @@ def build_lakera_guardrail_client_from_env() -> LakeraGuardrailClient | None:
         logging.getLogger("guardrail_client").warning("Lakera Guardrail enabled but LAKERA_API_KEY is missing")
         return None
 
+    project_id = (os.getenv("LAKERA_PROJECT_ID") or "").strip()
     endpoint = (os.getenv("LAKERA_GUARDRAIL_URL") or "https://api.lakera.ai/v2/guard").strip()
     timeout_raw = (os.getenv("LAKERA_TIMEOUT_SECONDS") or "10").strip()
     try:
@@ -82,13 +85,15 @@ def build_lakera_guardrail_client_from_env() -> LakeraGuardrailClient | None:
     except ValueError:
         timeout_seconds = 10
     logging.getLogger("guardrail_client").info(
-        "Lakera Guardrail configured enabled=true endpoint=%s timeout=%s",
+        "Lakera Guardrail configured enabled=true endpoint=%s project_id=%s timeout=%s",
         endpoint,
+        project_id,
         timeout_seconds,
     )
     return LakeraGuardrailClient(
         api_key=api_key,
         endpoint=endpoint,
+        project_id=project_id,
         timeout_seconds=timeout_seconds,
     )
 
