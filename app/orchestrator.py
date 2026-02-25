@@ -748,7 +748,8 @@ class Orchestrator:
         return tool_calls
 
     def _is_known_tool_name(self, name: str) -> bool:
-        return bool(_KNOWN_TOOL_NAME_PATTERN.match((name or "").strip()))
+        normalized = self._normalize_tool_name(name)
+        return bool(_KNOWN_TOOL_NAME_PATTERN.match((normalized or "").strip()))
 
     def _normalize_tool_name(self, name: str | None) -> str:
         normalized = (name or "").strip()
@@ -756,6 +757,7 @@ class Orchestrator:
             "run_python_code": "execute_in_sandbox",
             "run_code": "execute_in_sandbox",
             "execute_python": "execute_in_sandbox",
+            "execute_python_code": "execute_in_sandbox",
             "python_exec": "execute_in_sandbox",
         }
         return aliases.get(normalized, normalized)
