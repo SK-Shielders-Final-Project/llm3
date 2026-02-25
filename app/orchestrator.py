@@ -249,6 +249,20 @@ class Orchestrator:
                         tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": user_prompt})]
                     else:
                         logger.info("LLM 거부 감지했지만 실행 의도 없음 - 샌드박스 강제 호출 생략: %s", message.content)
+
+        if not tool_calls:
+            fallback_calls = self._build_fallback_tool_calls_from_plan(
+                rag_plan=rag_plan,
+                user_id=message.user_id,
+            )
+            if fallback_calls:
+                logger.info(
+                    "의도 기반 fallback 도구 호출 적용 intent=%s decision=%s tools=%s",
+                    rag_plan.get("intent"),
+                    rag_plan.get("decision"),
+                    [c.name for c in fallback_calls],
+                )
+                tool_calls = fallback_calls
         
         if not tool_calls:
             fallback_text = response.content or rag_context or "요청에 대한 답변을 생성할 수 없습니다."
@@ -1041,7 +1055,7 @@ class Orchestrator:
         # Sandbox Evasion 취약점: 코드 검증 완화
         vulnerable_sandbox = os.getenv("VULNERABLE_SANDBOX_EVASION", "false").strip().lower() in {"true", "1", "yes"}
 
-        # # 최소 차단 규칙은 취약 모드에서도 항상 적용한다.
+        # 최소 차단 규칙은 취약 모드에서도 항상 적용한다.
         # pattern = globals().get("_BLOCKED_CODE_PATTERN")
         # if pattern and pattern.search(code):
         #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
@@ -1207,6 +1221,66 @@ class Orchestrator:
         if not text:
             return False
         return bool(_EXECUTION_INTENT_PATTERN.search(text))
+
+    def _build_fallback_tool_calls_from_plan(
+        self,
+        *,
+        rag_plan: dict[str, Any],
+        user_id: int | None,
+    ) -> list[Any]:
+        if user_id is None:
+            return []
+        try:
+            normalized_user_id = int(user_id)
+        except (TypeError, ValueError):
+            return []
+        if normalized_user_id <= 0:
+            return []
+
+        intent = rag_plan.get("intent") or {}
+        decision = rag_plan.get("decision") or {}
+        intent_name = str(intent.get("intent") or "")
+        data_source = str(decision.get("data_source") or intent.get("data_source") or "")
+        tables = {str(name) for name in (intent.get("mysql_tables") or []) if name}
+        allowlist = [str(name) for name in (rag_plan.get("tool_allowlist") or []) if name]
+
+        # vector_only는 DB 도구 실행 없이 자연어/문서 기반 응답을 우선한다.
+        if data_source == "vector_only":
+            return []
+
+        def _call(name: str, args: dict[str, Any]) -> list[Any]:
+            return [SimpleNamespace(name=name, arguments=args)]
+
+        if intent_name == "personal_data":
+            if "rentals" in tables:
+                return _call("get_rentals", {"user_id": normalized_user_id, "days": 30})
+            if "payments" in tables:
+                return _call("get_payments", {"user_id": normalized_user_id, "limit": 20})
+            if "inquiries" in tables:
+                return _call("get_inquiries", {"user_id": normalized_user_id})
+            if "users" in tables or "get_user_profile" in allowlist:
+                return _call("get_user_profile", {"user_id": normalized_user_id})
+            return _call("get_user_profile", {"user_id": normalized_user_id})
+
+        if "rentals" in tables:
+            return _call("get_rentals", {"user_id": normalized_user_id, "days": 30})
+        if "payments" in tables:
+            return _call("get_payments", {"user_id": normalized_user_id, "limit": 20})
+        if "inquiries" in tables:
+            return _call("get_inquiries", {"user_id": normalized_user_id})
+        if "users" in tables:
+            return _call("get_user_profile", {"user_id": normalized_user_id})
+
+        for tool_name in allowlist:
+            if tool_name == "get_rentals":
+                return _call("get_rentals", {"user_id": normalized_user_id, "days": 30})
+            if tool_name == "get_payments":
+                return _call("get_payments", {"user_id": normalized_user_id, "limit": 20})
+            if tool_name == "get_inquiries":
+                return _call("get_inquiries", {"user_id": normalized_user_id})
+            if tool_name == "get_user_profile":
+                return _call("get_user_profile", {"user_id": normalized_user_id})
+        return []
 
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
