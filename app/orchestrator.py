@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, AsyncIterator
 
 from app.clients.guardrail_client import GuardrailClient
 from app.clients.llm_client import LlmClient
@@ -441,6 +441,51 @@ class Orchestrator:
             "images": [],
             "elapsed_seconds": elapsed,
         }
+
+    async def stream_user_request(self, message: LlmMessage) -> AsyncIterator[str]:
+        """
+        도구 오케스트레이션을 생략하고 vLLM 스트리밍을 SSE용으로 바로 전달한다.
+        (저지연 채팅 경로)
+        """
+        logger = logging.getLogger("orchestrator")
+        start = time.monotonic()
+        guarded_prompt = self._apply_guardrail_input(message.content, logger=logger)
+        if not guarded_prompt.strip():
+            blocked = "안전 정책에 따라 요청을 처리할 수 없습니다. 다른 방식으로 질문해 주세요."
+            yield blocked
+            return
+
+        system_prompt = build_system_context(message)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": guarded_prompt},
+        ]
+
+        chunks: list[str] = []
+        try:
+            async for chunk in self.llm_client.create_completion_stream(messages=messages, tools=[]):
+                chunks.append(chunk)
+                yield chunk
+        except Exception:
+            logger.exception("스트리밍 응답 생성 실패")
+            yield "\n요청 처리 중 오류가 발생했습니다."
+            return
+
+        final_text = "".join(chunks).strip()
+        final_text = self._sanitize_text(
+            final_text,
+            admin_level=getattr(message, "admin_level", None) or 0,
+        )
+        final_text = self._apply_guardrail_output(final_text, logger=logger)
+        elapsed = time.monotonic() - start
+        logger.info("스트리밍 응답 완료 elapsed=%.2fs len=%d", elapsed, len(final_text))
+        self._store_chat_history(
+            user_id=message.user_id,
+            question=message.content,
+            answer=final_text,
+            intent=None,
+            logger=logger,
+        )
 
 
     def _store_chat_history(

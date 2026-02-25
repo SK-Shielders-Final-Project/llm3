@@ -5,6 +5,7 @@ import os
 import threading
 import time
 import urllib.request
+import json
 
 from dotenv import load_dotenv
 from typing import Any
@@ -12,9 +13,14 @@ from typing import Any
 load_dotenv(override=True)
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 
 from app.clients.guardrail_client import build_guardrail_client_from_env
-from app.clients.llm_client import LlmClient, build_http_completion_func
+from app.clients.llm_client import (
+    LlmClient,
+    build_http_completion_func,
+    build_http_stream_completion_func,
+)
 from app.clients.sandbox_client import SandboxClient
 from app.orchestrator import Orchestrator
 from app.service.registry import FunctionRegistry
@@ -129,7 +135,8 @@ def _build_vram_exceeded_message(
 
 def create_orchestrator() -> Orchestrator:
     llm_completion = build_http_completion_func()
-    llm_client = LlmClient(llm_completion)
+    llm_stream_completion = build_http_stream_completion_func()
+    llm_client = LlmClient(llm_completion, stream_completion_func=llm_stream_completion)
     sandbox_url = os.getenv("SANDBOX_SERVER_URL", "")
     sandbox_timeout_raw = os.getenv("SANDBOX_TIMEOUT_SECONDS", "60")
     sandbox_timeout = int(sandbox_timeout_raw) if sandbox_timeout_raw.strip() else 60
@@ -308,6 +315,43 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
         model=result.get("model", "unknown"),
         tools_used=result.get("tools_used", []),
         images=result.get("images", []),
+    )
+
+
+@app.post("/api/generate/stream")
+async def generate_stream(request: GenerateRequest) -> StreamingResponse:
+    """
+    저지연 스트리밍(SSE) 응답.
+    - text/event-stream
+    - vLLM stream=true 사용
+    """
+    if request.message is not None:
+        message = request.message
+    elif request.user_id is not None and request.comment:
+        message = LlmMessage(role="user", user_id=request.user_id, content=request.comment)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="요청 형식이 올바르지 않습니다. message 또는 comment/user_id를 제공하세요.",
+        )
+
+    async def _event_generator():
+        try:
+            async for chunk in orchestrator.stream_user_request(message):
+                yield f"event: token\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+        except Exception as exc:
+            payload = {"error": str(exc)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
