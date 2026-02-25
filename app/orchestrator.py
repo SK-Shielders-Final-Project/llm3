@@ -1342,22 +1342,30 @@ class Orchestrator:
     def _extract_first_code_fence(self, content: str) -> tuple[str | None, str | None]:
         if not content:
             return None, None
-        cursor = 0
-        while True:
-            start = content.find("```", cursor)
-            if start == -1:
-                return None, None
-            header_end = content.find("\n", start + 3)
-            if header_end == -1:
-                return None, None
-            lang = content[start + 3 : header_end].strip()
-            end = content.find("```", header_end + 1)
-            if end == -1:
-                return None, None
-            body = content[header_end + 1 : end].strip()
-            if body:
-                return lang or None, body
-            cursor = end + 3
+        # ```python\n...\n``` 와 ```python ...```(같은 줄 시작) 모두 허용
+        fence_pattern = re.compile(r"```([a-zA-Z0-9_-]*)\s*([\s\S]*?)```")
+        preferred_langs = {
+            "python",
+            "py",
+            "bash",
+            "sh",
+            "shell",
+            "cmd",
+            "powershell",
+        }
+        fallback: tuple[str | None, str | None] = (None, None)
+
+        for match in fence_pattern.finditer(content):
+            lang = (match.group(1) or "").strip().lower() or None
+            body = (match.group(2) or "").strip()
+            if not body:
+                continue
+            # 언어 태그가 붙은 코드블록을 우선 채택
+            if lang in preferred_langs:
+                return lang, body
+            if fallback == (None, None):
+                fallback = (lang, body)
+        return fallback
 
     def _looks_like_raw_code(self, content: str) -> bool:
         text = (content or "").strip()
