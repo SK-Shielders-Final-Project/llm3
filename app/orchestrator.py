@@ -10,7 +10,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
-from app.clients.guardrail_client import GuardrailClient
+from app.clients.aws_guardrail_client import GuardrailClientProtocol
 from app.clients.llm_client import LlmClient
 from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
@@ -85,7 +85,7 @@ class Orchestrator:
         llm_client: LlmClient,
         sandbox_client: SandboxClient,
         registry: FunctionRegistry,
-        guardrail_client: GuardrailClient | None = None,
+        guardrail_client: GuardrailClientProtocol | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.sandbox_client = sandbox_client

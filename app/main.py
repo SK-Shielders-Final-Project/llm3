@@ -13,7 +13,7 @@ load_dotenv(override=True)
 
 from fastapi import FastAPI, HTTPException, Response
 
-from app.clients.guardrail_client import build_guardrail_client_from_env
+from app.clients.aws_guardrail_client import build_guardrail_client_from_env
 from app.clients.llm_client import LlmClient, build_http_completion_func
 from app.clients.sandbox_client import SandboxClient
 from app.orchestrator import Orchestrator

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
-from app.clients.guardrail_client import GuardrailClient
+from app.clients.aws_guardrail_client import GuardrailClientProtocol
 from app.clients.llm_client import LlmClient
 from app.service.mongo.search import search_knowledge
 from app.service.mongo.store import store_user_message
@@ -83,7 +83,7 @@ class RagPipeline:
         self,
         llm_client: LlmClient,
         weights: RagWeights | None = None,
-        guardrail_client: GuardrailClient | None = None,
+        guardrail_client: GuardrailClientProtocol | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.weights = weights or RagWeights()

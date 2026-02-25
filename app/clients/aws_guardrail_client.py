@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import boto3
 
@@ -13,6 +13,10 @@ class GuardrailDecision:
     action: str
     output_text: str | None
     raw: dict[str, Any]
+
+
+class GuardrailClientProtocol(Protocol):
+    def apply(self, *, text: str, source: str) -> GuardrailDecision: ...
 
 
 class GuardrailClient:
@@ -43,7 +47,7 @@ class GuardrailClient:
             )
         except Exception:
             self._logger.exception(
-                "Guardrail apply failed source=%s region=%s identifier=%s",
+                "AWS Guardrail apply failed source=%s region=%s identifier=%s",
                 source,
                 self._region,
                 self._identifier,
@@ -53,7 +57,7 @@ class GuardrailClient:
         output_text = _extract_output_text(response) or text
         changed = (output_text or "").strip() != text.strip()
         self._logger.info(
-            "Guardrail applied source=%s action=%s changed=%s input_len=%d output_len=%d region=%s identifier=%s",
+            "AWS Guardrail applied source=%s action=%s changed=%s input_len=%d output_len=%d region=%s identifier=%s",
             source,
             action,
             changed,
@@ -65,16 +69,27 @@ class GuardrailClient:
         return GuardrailDecision(action=action, output_text=output_text, raw=response)
 
 
-def build_guardrail_client_from_env() -> GuardrailClient | None:
-    enabled = os.getenv("GUARDRAIL_ENABLED", "true").strip().lower()
+def _env_true(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _lakera_enabled() -> bool:
+    # 사용자 요청 오탈자 키(LAKERA_GUARDRAUL_ENABLED)도 지원
+    return _env_true("LAKERA_GUARDRAUL_ENABLED", "false") or _env_true(
+        "LAKERA_GUARDRAIL_ENABLED", "false"
+    )
+
+
+def build_aws_guardrail_client_from_env() -> GuardrailClient | None:
+    enabled = os.getenv("BEDROCK_GUARDRAIL_ENABLED", "true").strip().lower()
     if enabled not in ("1", "true", "yes"):
-        logging.getLogger("guardrail_client").info("Guardrail disabled via GUARDRAIL_ENABLED=%s", enabled)
+        logging.getLogger("guardrail_client").info("AWS Guardrail disabled via BEDROCK_GUARDRAIL_ENABLED=%s", enabled)
         return None
 
     identifier = os.getenv("BEDROCK_GUARDRAIL_IDENTIFIER") or os.getenv("GUARDRAIL_IDENTIFIER")
     if not identifier:
         logging.getLogger("guardrail_client").warning(
-            "Guardrail enabled but identifier is missing. Set BEDROCK_GUARDRAIL_IDENTIFIER or GUARDRAIL_IDENTIFIER."
+            "AWS Guardrail enabled but identifier is missing. Set BEDROCK_GUARDRAIL_IDENTIFIER or GUARDRAIL_IDENTIFIER."
         )
         return None
 
@@ -85,12 +100,28 @@ def build_guardrail_client_from_env() -> GuardrailClient | None:
         or "ap-northeast-2"
     )
     logging.getLogger("guardrail_client").info(
-        "Guardrail client configured enabled=true region=%s version=%s identifier=%s",
+        "AWS Guardrail client configured enabled=true region=%s version=%s identifier=%s",
         region,
         version,
         identifier,
     )
     return GuardrailClient(identifier=identifier, version=version, region=region)
+
+
+def build_guardrail_client_from_env() -> GuardrailClientProtocol | None:
+    logger = logging.getLogger("guardrail_client")
+    if _lakera_enabled():
+        from app.clients.lakera_guardrail_client import build_lakera_guardrail_client_from_env
+
+        client = build_lakera_guardrail_client_from_env()
+        if client is not None:
+            logger.info("Active guardrail provider=lakera")
+            return client
+        logger.warning("Lakera guardrail enabled but client init failed; fallback to AWS guardrail")
+    client = build_aws_guardrail_client_from_env()
+    if client is not None:
+        logger.info("Active guardrail provider=aws")
+    return client
 
 
 def _extract_output_text(response: dict[str, Any]) -> str | None:
