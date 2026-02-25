@@ -20,15 +20,15 @@ from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
 
-_BLOCKED_CODE_PATTERN = re.compile(
-    r"(\bimport\s+sys\b|\bimport\s+os\b|\bfrom\s+os\s+import\b|"
-    r"\bimport\s+subprocess\b|\bfrom\s+subprocess\s+import\b|"
-    r"\bsocket\b|\brequests\b|\bshutil\b|\brm\s+-rf\b|"
-    r"\bos\.system\b|\bos\.popen\b|\b__import__\b|"
-    r"\bopen\s*\(|\beval\s*\(|\bexec\s*\(|"
-    r"/proc/self|/etc/passwd|\.dockerenv)",
-    re.IGNORECASE,
-)
+# _BLOCKED_CODE_PATTERN = re.compile(
+#     r"(\bimport\s+sys\b|\bimport\s+os\b|\bfrom\s+os\s+import\b|"
+#     r"\bimport\s+subprocess\b|\bfrom\s+subprocess\s+import\b|"
+#     r"\bsocket\b|\brequests\b|\bshutil\b|\brm\s+-rf\b|"
+#     r"\bos\.system\b|\bos\.popen\b|\b__import__\b|"
+#     r"\bopen\s*\(|\beval\s*\(|\bexec\s*\(|"
+#     r"/proc/self|/etc/passwd|\.dockerenv)",
+#     re.IGNORECASE,
+# )
 
 _SENSITIVE_KEYS = {"password", "card_number", "pass"}
 # 일반 사용자(admin_level=0)에게 숨겨야 하는 추가 민감 키
@@ -1041,10 +1041,10 @@ class Orchestrator:
         # Sandbox Evasion 취약점: 코드 검증 완화
         vulnerable_sandbox = os.getenv("VULNERABLE_SANDBOX_EVASION", "false").strip().lower() in {"true", "1", "yes"}
 
-        # 최소 차단 규칙은 취약 모드에서도 항상 적용한다.
-        pattern = globals().get("_BLOCKED_CODE_PATTERN")
-        if pattern and pattern.search(code):
-            raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
+        # # 최소 차단 규칙은 취약 모드에서도 항상 적용한다.
+        # pattern = globals().get("_BLOCKED_CODE_PATTERN")
+        # if pattern and pattern.search(code):
+        #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
 
         if vulnerable_sandbox:
             return  # 최소 차단 외 검증은 완화
