@@ -185,26 +185,30 @@ class Orchestrator:
             logger.info("phase=rag_plan elapsed=%.3fs", time.monotonic() - phase_started)
             decision = rag_plan.get("decision") or {}
             if decision.get("data_source") == "vector_only":
-                phase_started = time.monotonic()
-                rag_result = self.rag_pipeline.answer_from_plan(
-                    question=message.content,
-                    user_id=message.user_id,
-                    plan=rag_plan,
-                    admin_level=getattr(message, "admin_level", None),
-                    apply_input_guardrail=False,
-                    apply_output_guardrail=True,
-                )
-                logger.info("phase=rag_answer_vector_only elapsed=%.3fs", time.monotonic() - phase_started)
-                elapsed = time.monotonic() - start
-                # vector_only는 이미 RAG에서 최종 답변을 생성하므로 오케스트레이터의
-                # 추가 LLM 계획/후처리 단계를 생략해 지연을 줄인다.
-                return {
-                    "text": rag_result.get("answer", ""),
-                    "model": "rag-vector-only",
-                    "tools_used": [],
-                    "images": [],
-                    "elapsed_seconds": elapsed,
-                }
+                if self._should_force_sandbox_by_llm(user_prompt=user_prompt):
+                    logger.info("phase=rag_answer_vector_only bypassed reason=llm_sandbox_decision")
+                    rag_context = rag_plan.get("context", "")
+                else:
+                    phase_started = time.monotonic()
+                    rag_result = self.rag_pipeline.answer_from_plan(
+                        question=message.content,
+                        user_id=message.user_id,
+                        plan=rag_plan,
+                        admin_level=getattr(message, "admin_level", None),
+                        apply_input_guardrail=False,
+                        apply_output_guardrail=True,
+                    )
+                    logger.info("phase=rag_answer_vector_only elapsed=%.3fs", time.monotonic() - phase_started)
+                    elapsed = time.monotonic() - start
+                    # vector_only는 이미 RAG에서 최종 답변을 생성하므로 오케스트레이터의
+                    # 추가 LLM 계획/후처리 단계를 생략해 지연을 줄인다.
+                    return {
+                        "text": rag_result.get("answer", ""),
+                        "model": "rag-vector-only",
+                        "tools_used": [],
+                        "images": [],
+                        "elapsed_seconds": elapsed,
+                    }
             rag_context = rag_plan.get("context", "")
 
         ## 시스템 프롬프트와 도구 스키마 준비
@@ -256,8 +260,11 @@ class Orchestrator:
                 response_content=response.content,
                 user_prompt=user_prompt,
             )
-            if not sandbox_args and self._looks_like_execution_payload(response.content):
-                # 코드 추출이 실패해도, LLM이 실행형 응답을 냈다면 샌드박스로 폴백한다.
+            if not sandbox_args and self._should_force_sandbox_by_llm(
+                user_prompt=user_prompt,
+                llm_response=response.content,
+            ):
+                # 코드 추출이 실패해도 LLM이 실행이 필요하다고 판단하면 샌드박스로 폴백한다.
                 sandbox_args = {"task": user_prompt}
             if sandbox_args:
                 logger.info("LLM 코드 응답 감지 - execute_in_sandbox로 강제 연결")
@@ -1369,29 +1376,41 @@ class Orchestrator:
                 score += 1
         return score >= 2
 
-    def _looks_like_execution_payload(self, content: str) -> bool:
-        text = (content or "").strip()
-        if not text:
-            return False
-        lowered = text.lower()
-        if "```" in lowered:
-            return True
-        markers = (
-            "import ",
-            "subprocess",
-            "os.makedirs",
-            "try:",
-            "except",
-            "print(",
-            "mkdir",
-            "ls ",
-            "/mnt",
+    def _should_force_sandbox_by_llm(
+        self,
+        *,
+        user_prompt: str,
+        llm_response: str | None = None,
+    ) -> bool:
+        """
+        실행 필요 여부를 정규식 키워드가 아닌 LLM 판별로 결정한다.
+        """
+        system_prompt = (
+            "너는 실행 라우팅 판별기다. 사용자 요청이 실행(코드/명령어 실행, 계산, 파일/시스템 조작) "
+            "대상인지 판별하라. 반드시 JSON 하나만 출력하라: "
+            "{\"execute_in_sandbox\": true|false}. 추가 텍스트 금지."
         )
-        score = 0
-        for marker in markers:
-            if marker in lowered:
-                score += 1
-        return score >= 2
+        user_content = (
+            f"사용자 요청:\n{user_prompt}\n\n"
+            f"LLM 응답(있으면 참고):\n{llm_response or ''}\n"
+        )
+        try:
+            decision = self.llm_client.create_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                tools=[],
+            )
+            content = (decision.content or "").strip()
+            if not content:
+                return False
+            payload_text = self._strip_code_fences(content).strip()
+            parsed = json.loads(payload_text)
+            return bool(parsed.get("execute_in_sandbox"))
+        except Exception:
+            logging.getLogger("orchestrator").exception("LLM 기반 실행 라우팅 판별 실패")
+            return False
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
         if not results:
