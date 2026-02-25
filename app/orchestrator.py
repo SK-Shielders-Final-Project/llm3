@@ -309,9 +309,45 @@ class Orchestrator:
             if tool_name != call.name:
                 logger.info("도구 별칭 정규화: %s -> %s", call.name, tool_name)
             if tool_name not in allowed_tool_names:
-                # LLM이 print(), len() 같은 내장 함수를 "도구"로 착각하는 경우가 있다.
-                # 실제로 실행 가능한 도구만 실행하고 나머지는 결과에만 기록한다.
-                logger.warning("알 수 없는 도구 호출 무시 tool=%s args=%s", tool_name, getattr(call, "arguments", None))
+                # 등록되지 않은 도구 이름이라도 실행형 요청이면 샌드박스로 강제 우회한다.
+                fallback_args: dict[str, Any] = {}
+                try:
+                    parsed_unknown = self._parse_args(call.arguments)
+                    task = (
+                        parsed_unknown.get("task")
+                        or parsed_unknown.get("query")
+                        or parsed_unknown.get("description")
+                        or message.content
+                    )
+                    fallback_args["task"] = task
+                    if parsed_unknown.get("code"):
+                        fallback_args["code"] = parsed_unknown.get("code")
+                    if parsed_unknown.get("inputs") is not None:
+                        fallback_args["inputs"] = parsed_unknown.get("inputs")
+                    if parsed_unknown.get("required_packages") is not None:
+                        fallback_args["required_packages"] = parsed_unknown.get("required_packages")
+                except Exception:
+                    fallback_args = {"task": message.content}
+
+                if self._should_force_sandbox_by_llm(
+                    user_prompt=message.content,
+                    llm_response=f"{call.name}({call.arguments})",
+                ):
+                    logger.warning(
+                        "알 수 없는 도구 호출을 execute_in_sandbox로 우회 tool=%s",
+                        tool_name,
+                    )
+                    tool_name = "execute_in_sandbox"
+                    call = SimpleNamespace(name=tool_name, arguments=fallback_args)
+                else:
+                    # 실행형이 아니면 기존처럼 에러로 기록한다.
+                    logger.warning("알 수 없는 도구 호출 무시 tool=%s args=%s", tool_name, getattr(call, "arguments", None))
+                    results.append({"tool": tool_name, "error": "Unknown function"})
+                    tools_used.append(tool_name)
+                    continue
+
+            if tool_name not in allowed_tool_names:
+                logger.warning("허용되지 않은 도구 호출 차단 tool=%s", tool_name)
                 results.append({"tool": tool_name, "error": "Unknown function"})
                 tools_used.append(tool_name)
                 continue
