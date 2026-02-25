@@ -46,6 +46,17 @@ def configure_logging() -> None:
         force=True,
     )
 
+    # ── HuggingFace / sentence-transformers 불필요 로그 억제 ──
+    for noisy_logger in (
+        "transformers",
+        "sentence_transformers",
+        "huggingface_hub",
+        "tokenizers",
+        "filelock",
+        "urllib3",
+    ):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 
 configure_logging()
 
