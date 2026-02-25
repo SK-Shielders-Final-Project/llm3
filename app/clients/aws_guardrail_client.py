@@ -74,10 +74,7 @@ def _env_true(name: str, default: str = "false") -> bool:
 
 
 def _lakera_enabled() -> bool:
-    # 사용자 요청 오탈자 키(LAKERA_GUARDRAUL_ENABLED)도 지원
-    return _env_true("LAKERA_GUARDRAUL_ENABLED", "false") or _env_true(
-        "LAKERA_GUARDRAIL_ENABLED", "false"
-    )
+    return _env_true("LAKERA_GUARDRAIL_ENABLED", "false")
 
 
 def build_aws_guardrail_client_from_env() -> GuardrailClient | None:
