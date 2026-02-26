@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any
@@ -14,6 +15,19 @@ from app.clients.aws_guardrail_client import GuardrailDecision
 # 공식 모델: nvidia/llama-3.1-nemoguard-8b-content-safety
 # 참고: https://build.nvidia.com/nvidia/llama-3_1-nemoguard-8b-content-safety
 # ──────────────────────────────────────────────────────────────────────
+
+# ── 특수 토큰 주입(Turn Injection) 탐지 ──────────────────────────────
+# Gemma 3 등 모델의 특수 토큰을 이용한 턴 강제 종료/주입 공격을 사전 차단.
+# NeMo Content Safety 모델은 콘텐츠 카테고리만 검사하므로, 이런 구조적
+# prompt injection은 별도 로컬 필터가 필요하다.
+_SPECIAL_TOKEN_PATTERN = re.compile(
+    r"<\s*/?(?:"
+    r"end_of_turn|start_of_turn|eos|bos|pad|unk|"           # Gemma 계열
+    r"start_header_id|end_header_id|eot_id|"                  # Llama 계열
+    r"\|(?:im_start|im_end|system|user|assistant)\|"          # ChatML 계열
+    r")\s*>",
+    re.IGNORECASE,
+)
 
 # Aegis 2.0 Safety Taxonomy — 23개 카테고리
 _SAFETY_TAXONOMY = (
@@ -69,6 +83,10 @@ class NemoGuardrailClient:
 
     NVIDIA NIM API를 통해 ``nvidia/llama-3.1-nemoguard-8b-content-safety``
     모델을 호출하여 입력/출력 텍스트에 대한 콘텐츠 안전성 검사를 수행합니다.
+
+    추가로, LLM 특수 토큰(``<end_of_turn>``, ``<start_of_turn>`` 등)을
+    이용한 턴 주입(prompt injection) 공격은 NeMo API 호출 전에 로컬에서
+    사전 차단합니다.
     """
 
     MODEL = "nvidia/llama-3.1-nemoguard-8b-content-safety"
@@ -90,6 +108,9 @@ class NemoGuardrailClient:
     def apply(self, *, text: str, source: str) -> GuardrailDecision:
         """텍스트에 대해 NeMo Content Safety 검사를 수행합니다.
 
+        1단계: 특수 토큰 주입(Turn Injection) 사전 차단 (로컬)
+        2단계: NeMo Content Safety 모델 API 호출 (원격)
+
         Args:
             text: 검사할 텍스트
             source: ``"INPUT"`` (사용자 입력) 또는 ``"OUTPUT"`` (LLM 응답)
@@ -99,6 +120,23 @@ class NemoGuardrailClient:
         """
         if not text:
             return GuardrailDecision(action="NONE", output_text=text, raw={})
+
+        # ── 1단계: 특수 토큰 주입 사전 차단 ──────────────────────────
+        token_match = _SPECIAL_TOKEN_PATTERN.search(text)
+        if token_match:
+            matched = token_match.group()
+            self._logger.warning(
+                "NeMo Guardrail BLOCKED — 특수 토큰 주입 감지 "
+                "source=%s matched_token=%s input_len=%d",
+                source,
+                matched,
+                len(text),
+            )
+            return GuardrailDecision(
+                action="BLOCK",
+                output_text="",
+                raw={"blocked_by": "special_token_filter", "matched": matched},
+            )
 
         prompt = self._build_prompt(text, source)
 
@@ -308,7 +346,6 @@ def _parse_safety_json(content: str) -> dict[str, Any] | None:
         pass
 
     # ```json 블록 안에 JSON이 있을 수 있음
-    import re
 
     json_match = re.search(r"\{[^{}]*\}", content, re.DOTALL)
     if json_match:
