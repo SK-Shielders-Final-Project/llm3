@@ -29,52 +29,50 @@ _SPECIAL_TOKEN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Aegis 2.0 Safety Taxonomy — 23개 카테고리
+# Aegis 2.0 Safety Taxonomy — 23개 카테고리 (한국어)
 _SAFETY_TAXONOMY = (
-    "S1: Violence. "
-    "S2: Sexual. "
-    "S3: Criminal Planning/Confessions. "
-    "S4: Guns and Illegal Weapons. "
-    "S5: Controlled/Regulated Substances. "
-    "S6: Suicide and Self Harm. "
-    "S7: Sexual (minor). "
-    "S8: Hate/Identity Hate. "
-    "S9: PII/Privacy. "
-    "S10: Harassment. "
-    "S11: Threat. "
-    "S12: Profanity. "
-    "S13: Needs Caution. "
-    "S14: Other. "
-    "S15: Manipulation. "
-    "S16: Fraud/Deception. "
-    "S17: Malware. "
-    "S18: High Risk Gov Decision Making. "
-    "S19: Political/Misinformation/Conspiracy. "
-    "S20: Copyright/Trademark/Plagiarism. "
-    "S21: Unauthorized Advice. "
-    "S22: Illegal Activity. "
-    "S23: Immoral/Unethical."
+    "S1: 폭력. "
+    "S2: 성적 콘텐츠. "
+    "S3: 범죄 계획/고백. "
+    "S4: 총기 및 불법 무기. "
+    "S5: 규제 약물/물질. "
+    "S6: 자살 및 자해. "
+    "S7: 미성년자 성적 콘텐츠. "
+    "S8: 혐오/차별 발언. "
+    "S9: 개인정보/프라이버시 침해. "
+    "S10: 괴롭힘. "
+    "S11: 위협. "
+    "S12: 욕설/비속어. "
+    "S13: 주의 필요. "
+    "S14: 기타. "
+    "S15: 조작/심리 조종. "
+    "S16: 사기/기만. "
+    "S17: 악성코드/멀웨어. "
+    "S18: 고위험 정부 의사결정. "
+    "S19: 정치적 허위정보/음모론. "
+    "S20: 저작권/상표권/표절. "
+    "S21: 무허가 조언. "
+    "S22: 불법 활동. "
+    "S23: 비도덕적/비윤리적 행위."
 )
 
 _INSTRUCTION = (
-    "Task: Check if there is unsafe content in the user or agent messages "
-    "in the below conversation in accordance with our safety policy with "
-    "the below categories. Provide a safe or unsafe 'rating' for both the "
-    "user message and the agent response. If there is unsafe content, "
-    "please also provide a list of violated categories according to our "
-    "safety policy below."
+    "작업: 아래 대화에서 사용자 또는 에이전트 메시지에 안전 정책에 "
+    "위반되는 위험한 콘텐츠가 있는지 확인하세요. 아래 카테고리를 기준으로 "
+    "사용자 메시지와 에이전트 응답 각각에 대해 'safe' 또는 'unsafe' 등급을 "
+    "부여하세요. 위험한 콘텐츠가 있는 경우, 위반된 카테고리 목록도 함께 "
+    "제공하세요."
 )
 
 _OUTPUT_FORMAT = (
-    'Provide your safety assessment for the above conversation in the '
-    'below output JSON format: '
-    '{"User Safety": safe or unsafe rating for the user message, '
-    '"Response Safety": safe or unsafe rating for the agent response. '
-    'Omit if no agent response present. '
-    '"Safety Categories": a comma-separated list of applicable safety '
-    'categories from the provided taxonomy. Omit if all safe.} '
-    'Do not include anything other than the output JSON in your response. '
-    'Output JSON:'
+    '위 대화에 대한 안전성 평가를 아래 JSON 형식으로 제공하세요: '
+    '{"User Safety": 사용자 메시지에 대한 safe 또는 unsafe 등급, '
+    '"Response Safety": 에이전트 응답에 대한 safe 또는 unsafe 등급. '
+    '에이전트 응답이 없으면 생략. '
+    '"Safety Categories": 위반된 안전 카테고리의 쉼표로 구분된 목록. '
+    '모두 안전하면 생략.} '
+    '출력 JSON 외에 다른 내용은 포함하지 마세요. '
+    '출력 JSON:'
 )
 
 
@@ -200,29 +198,25 @@ class NemoGuardrailClient:
     # ── 프롬프트 구성 ────────────────────────────────────────────────
     @staticmethod
     def _build_prompt(text: str, source: str) -> str:
-        """공식 NeMo Content Safety 프롬프트 템플릿을 구성합니다.
-
-        참고: https://docs.api.nvidia.com/nim/reference/
-              nvidia-llama-3_1-nemoguard-8b-content-safety
-        """
+        """공식 NeMo Content Safety 프롬프트 템플릿을 한국어로 구성합니다."""
         is_output = source.upper() == "OUTPUT"
 
         conversation_block = ""
         if is_output:
-            # LLM 응답 검사 시 — agent 메시지로 전달
-            conversation_block = f"response: agent: {text}"
+            # LLM 응답 검사 시 — 에이전트 메시지로 전달
+            conversation_block = f"응답: 에이전트: {text}"
         else:
             # 사용자 입력 검사 시
-            conversation_block = f"user: {text}"
+            conversation_block = f"사용자: {text}"
 
         return (
             f"{_INSTRUCTION} "
-            f"<BEGIN UNSAFE CONTENT CATEGORIES> "
+            f"<위험 콘텐츠 카테고리 시작> "
             f"{_SAFETY_TAXONOMY} "
-            f"<END UNSAFE CONTENT CATEGORIES> "
-            f"<BEGIN CONVERSATION> "
+            f"<위험 콘텐츠 카테고리 끝> "
+            f"<대화 시작> "
             f"{conversation_block} "
-            f"<END CONVERSATION> "
+            f"<대화 끝> "
             f"{_OUTPUT_FORMAT}"
         )
 
