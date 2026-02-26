@@ -77,6 +77,10 @@ def _lakera_enabled() -> bool:
     return _env_true("LAKERA_GUARDRAIL_ENABLED", "false")
 
 
+def _nemo_enabled() -> bool:
+    return _env_true("NEMO_GUARDRAIL_ENABLED", "false")
+
+
 def build_aws_guardrail_client_from_env() -> GuardrailClient | None:
     enabled = os.getenv("BEDROCK_GUARDRAIL_ENABLED", "true").strip().lower()
     if enabled not in ("1", "true", "yes"):
@@ -107,6 +111,15 @@ def build_aws_guardrail_client_from_env() -> GuardrailClient | None:
 
 def build_guardrail_client_from_env() -> GuardrailClientProtocol | None:
     logger = logging.getLogger("guardrail_client")
+    # 우선순위: NeMo → Lakera → AWS
+    if _nemo_enabled():
+        from app.clients.nemo_guardrail import build_nemo_guardrail_client_from_env
+
+        client = build_nemo_guardrail_client_from_env()
+        if client is not None:
+            logger.info("Active guardrail provider=nemo")
+            return client
+        logger.warning("NeMo guardrail enabled but client init failed; fallback to next provider")
     if _lakera_enabled():
         from app.clients.lakera_guardrail_client import build_lakera_guardrail_client_from_env
 
