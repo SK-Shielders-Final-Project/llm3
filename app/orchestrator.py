@@ -1180,6 +1180,8 @@ class Orchestrator:
         cls_name = type(self.guardrail_client).__name__.lower()
         if "lakera" in cls_name:
             return "lakera"
+        if "nemo" in cls_name:
+            return "nemo"
         if "guardrail" in cls_name:
             return "aws"
         return "unknown"
