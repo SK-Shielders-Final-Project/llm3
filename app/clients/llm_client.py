@@ -4,11 +4,16 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
+
+# ── LLM 호출 시퀀스 카운터 (로그 식별용) ──
+_llm_call_seq = 0
+_llm_call_lock = threading.Lock()
 
 
 @dataclass
@@ -109,6 +114,12 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
         else:
             capped_max_tokens = max(16, min(desired_max_tokens, max(16, available)))
 
+        # ── LLM 호출 번호 부여 ──
+        global _llm_call_seq
+        with _llm_call_lock:
+            _llm_call_seq += 1
+            call_num = _llm_call_seq
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": prepared_messages,
@@ -120,29 +131,11 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             "stream": False,
         }
         logger.info(
-            "LLM max_tokens 캡핑 desired=%s capped=%s max_ctx=%s est_input=%s buffer=%s",
-            desired_max_tokens,
-            capped_max_tokens,
-            max_model_len,
-            est_input_tokens,
-            ctx_buffer,
+            "[LLM #%d] 요청 전송 messages=%d tools=%d",
+            call_num,
+            len(prepared_messages),
+            len(tools or []),
         )
-        if log_verbose:
-            safe_messages = _sanitize_messages(prepared_messages)
-            tool_names = _extract_tool_names(tools or [])
-            logger.info(
-                "LLM 요청 전송 messages=%s tools=%s endpoint=%s",
-                json.dumps(safe_messages, ensure_ascii=False),
-                json.dumps(tool_names, ensure_ascii=False),
-                endpoint,
-            )
-        else:
-            logger.info(
-                "LLM 요청 전송 message_count=%d tool_count=%d endpoint=%s",
-                len(prepared_messages),
-                len(tools or []),
-                endpoint,
-            )
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -155,14 +148,15 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as resp:
+                status_code = resp.status
+                data = json.loads(resp.read().decode("utf-8"))
                 elapsed = time.monotonic() - start
                 logger.info(
-                    "LLM 응답 성공 elapsed=%.2fs tool_count=%s endpoint=%s",
+                    "[LLM #%d] 응답 완료 elapsed=%.2fs status=%s",
+                    call_num,
                     elapsed,
-                    len(tools or []),
-                    endpoint,
+                    status_code,
                 )
                 if log_verbose:
                     logger.info("LLM raw 응답=%s", json.dumps(data, ensure_ascii=False))
@@ -213,16 +207,15 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
                         headers=headers,
                         method="POST",
                     )
-                    with urllib.request.urlopen(retry_request, timeout=timeout_seconds) as response:
-                        retry_json = json.loads(response.read().decode("utf-8"))
+                    with urllib.request.urlopen(retry_request, timeout=timeout_seconds) as resp2:
+                        retry_json = json.loads(resp2.read().decode("utf-8"))
                         elapsed = time.monotonic() - start
                         logger.info(
-                            "LLM 응답 성공(retry) elapsed=%.2fs tool_count=%s endpoint=%s",
+                            "[LLM #%d] 응답 완료(retry) elapsed=%.2fs status=%s",
+                            call_num,
                             elapsed,
-                            len(tools or []),
-                            endpoint,
+                            resp2.status,
                         )
-                        logger.info("LLM raw 응답(retry)=%s", json.dumps(retry_json, ensure_ascii=False))
                         return retry_json
 
             if "roles must alternate" in detail.lower():
@@ -432,12 +425,7 @@ def normalize_response(raw: Any) -> LlmResponse:
     if isinstance(choice, dict) and message is None and "text" in choice:
         message = choice.get("text")
 
-    logger.info(
-        "LLM normalize_response types raw=%s choice=%s message=%s",
-        type(raw).__name__,
-        type(choice).__name__,
-        type(message).__name__,
-    )
+    # normalize_response 디버그 로그 제거됨
 
     tool_calls_raw = []
     if isinstance(message, dict):

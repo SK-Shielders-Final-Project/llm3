@@ -272,7 +272,7 @@ class Orchestrator:
                 final_text = "요청에 대한 답변을 생성할 수 없습니다."
             elapsed = time.monotonic() - start
             logger.info(
-                "LLM 최종 응답 elapsed=%.2fs",
+                "[완료] 전체 처리 elapsed=%.2fs",
                 elapsed,
             )
             self._store_chat_history(
@@ -433,7 +433,7 @@ class Orchestrator:
         final_response = self.llm_client.create_completion(messages=final_messages, tools=[])
         elapsed = time.monotonic() - start
         logger.info(
-            "LLM 최종 응답 elapsed=%.2fs",
+            "[완료] 전체 처리 elapsed=%.2fs",
             elapsed,
         )
         final_text = self._sanitize_text(
@@ -1173,47 +1173,70 @@ class Orchestrator:
             return False
         return bool(_SYSTEM_PROMPT_INDIRECT_PATTERN.search(text))
 
+    def _get_guardrail_provider(self) -> str:
+        """현재 활성 가드레일 provider 이름을 반환한다."""
+        if not self.guardrail_client:
+            return "none"
+        cls_name = type(self.guardrail_client).__name__.lower()
+        if "lakera" in cls_name:
+            return "lakera"
+        if "guardrail" in cls_name:
+            return "aws"
+        return "unknown"
+
     def _apply_guardrail_input(self, text: str, *, logger: logging.Logger) -> str:
         if not self.guardrail_client:
-            logger.info("가드레일 비활성화 상태: 입력 원문 사용")
+            logger.info("[가드레일-입력] 비활성 (provider=none) - 입력 원문 사용")
             return text
+        provider = self._get_guardrail_provider()
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="INPUT")
         except Exception:
-            logger.exception("입력 가드레일 적용 실패 - 원문으로 진행")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("[가드레일-입력] 적용 실패 elapsed=%.2fs provider=%s - 원문으로 진행", g_elapsed, provider)
             return text
+        g_elapsed = time.monotonic() - g_start
         cleaned = (decision.output_text or "").strip()
         changed = cleaned != text.strip() if cleaned else True
         if decision.action != "NONE":
             logger.warning(
-                "입력 가드레일 개입 action=%s changed=%s input_len=%d output_len=%d",
+                "[가드레일-입력] 개입 action=%s changed=%s elapsed=%.2fs provider=%s",
                 decision.action,
                 changed,
-                len(text),
-                len(cleaned),
+                g_elapsed,
+                provider,
             )
         else:
-            logger.info("입력 가드레일 통과 action=NONE input_len=%d", len(text))
+            logger.info("[가드레일-입력] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
         return cleaned
 
     def _apply_guardrail_output(self, text: str, *, logger: logging.Logger) -> str:
         if not self.guardrail_client or not text:
+            if not self.guardrail_client:
+                logger.info("[가드레일-출력] 비활성 (provider=none) - 출력 원문 사용")
             return text
+        provider = self._get_guardrail_provider()
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="OUTPUT")
         except Exception:
-            logger.exception("출력 가드레일 적용 실패 - 기존 응답 유지")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("[가드레일-출력] 적용 실패 elapsed=%.2fs provider=%s - 기존 응답 유지", g_elapsed, provider)
             return text
+        g_elapsed = time.monotonic() - g_start
         cleaned = (decision.output_text or "").strip()
         changed = cleaned != text.strip() if cleaned else True
         if decision.action != "NONE":
             logger.warning(
-                "출력 가드레일 개입 action=%s changed=%s input_len=%d output_len=%d",
+                "[가드레일-출력] 개입 action=%s changed=%s elapsed=%.2fs provider=%s",
                 decision.action,
                 changed,
-                len(text),
-                len(cleaned),
+                g_elapsed,
+                provider,
             )
+        else:
+            logger.info("[가드레일-출력] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
         return cleaned or text
 
     def _should_force_sandbox(self, text: str | None) -> bool:

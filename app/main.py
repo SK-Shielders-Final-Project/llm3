@@ -54,6 +54,7 @@ def configure_logging() -> None:
         "tokenizers",
         "filelock",
         "urllib3",
+        "httpx",
     ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 

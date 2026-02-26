@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -711,10 +712,12 @@ class RagPipeline:
     def _apply_guardrail_input(self, text: str) -> str:
         if not self.guardrail_client:
             return text
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="INPUT")
         except Exception:
-            logger.exception("RAG 입력 가드레일 적용 실패 - 원문 유지")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("RAG 입력 가드레일 적용 실패 elapsed=%.2fs - 원문 유지", g_elapsed)
             return text
         cleaned = (decision.output_text or "").strip()
         return cleaned or text
@@ -722,10 +725,12 @@ class RagPipeline:
     def _apply_guardrail_output(self, text: str) -> str:
         if not self.guardrail_client:
             return text
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="OUTPUT")
         except Exception:
-            logger.exception("RAG 출력 가드레일 적용 실패 - 원문 유지")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("RAG 출력 가드레일 적용 실패 elapsed=%.2fs - 원문 유지", g_elapsed)
             return text
         cleaned = (decision.output_text or "").strip()
         return cleaned or text
