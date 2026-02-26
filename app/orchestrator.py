@@ -16,6 +16,7 @@ from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
 from app.service.rag import RagPipeline
 from app.service.mongo.store import store_user_message
+from app.service.mongo.indirection_prompt_search import check_indirection_prompt
 from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
@@ -116,6 +117,34 @@ class Orchestrator:
                 "elapsed_seconds": elapsed,
             }
         
+        # ── Indirection Prompt 우회 탐지 (VectorDB 기반) ──
+        ip_result = check_indirection_prompt(user_prompt)
+        if ip_result["blocked"]:
+            elapsed = time.monotonic() - start
+            final_text = "답변이 불가능한 내용입니다."
+            logger.warning(
+                "Indirection Prompt 차단 user_id=%s score=%.4f threshold=%.2f elapsed=%.2fs matched=%s",
+                message.user_id,
+                ip_result["score"],
+                ip_result["threshold"],
+                elapsed,
+                ip_result["matched_content"][:100] if ip_result["matched_content"] else "",
+            )
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=None,
+                logger=logger,
+            )
+            return {
+                "text": final_text,
+                "model": "indirection_prompt_guard",
+                "tools_used": [],
+                "images": [],
+                "elapsed_seconds": elapsed,
+            }
+
         # Prompt Injection 테스트: "시스템 프롬프트" 류 요청은 RAG/도구 경로로 보내지 않고
         # 여기서 바로 처리해 응답이 흔들리지 않게 만든다.
         vulnerable_prompt_injection = os.getenv("VULNERABLE_PROMPT_INJECTION", "false").strip().lower() in {
