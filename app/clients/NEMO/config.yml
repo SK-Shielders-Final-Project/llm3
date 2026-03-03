@@ -11,6 +11,7 @@ rails:
       - greeting
       - jailbreak protection
       - hate speech safety
+      - code execution protection
 
   # Output rails
   output:
