@@ -13,5 +13,4 @@ define bot avoid refusal
 define flow handle refusal
   bot express refusal
   bot avoid refusal
-  # Reroute to a tool call or standard procedure instead of just refusing
-  execute_in_sandbox
+  stop

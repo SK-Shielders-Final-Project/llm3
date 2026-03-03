@@ -9,4 +9,4 @@ define bot correct tool usage
 define flow enforce tool format
   bot use wrong tool format
   bot correct tool usage
-  # Logic to force the actual tool calling mechanism
+  stop
