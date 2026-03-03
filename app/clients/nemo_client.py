@@ -20,6 +20,13 @@ class NemoClient:
             self._logger.info("[NEMO-DEBUG] Importing nemoguardrails...")
             from nemoguardrails import RailsConfig, LLMRails
             
+            # Ensure OPENAI_API_KEY is available if we're using the 'openai' engine for NIM
+            # NVIDIA NIM API is OpenAI-compatible and often we use the 'openai' engine
+            # but with a different base_url.
+            if not os.getenv("OPENAI_API_KEY") and os.getenv("NVIDIA_API_KEY"):
+                self._logger.info("[NEMO-DEBUG] Setting OPENAI_API_KEY from NVIDIA_API_KEY for compatibility")
+                os.environ["OPENAI_API_KEY"] = os.environ["NVIDIA_API_KEY"]
+
             # Load configuration from the directory containing config.yml and .co files
             abs_config_path = os.path.abspath(config_path)
             self._logger.info(f"[NEMO-DEBUG] Loading RailsConfig from {abs_config_path}...")
