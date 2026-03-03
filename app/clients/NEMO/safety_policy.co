@@ -1,0 +1,18 @@
+# Safety policy flow based on S1-S23 taxonomy
+define user express hate speech
+  "혐오 발언"
+  "차별 발언"
+
+define bot refuse hate speech
+  "죄송합니다. 혐오나 차별 섞인 발언에는 응답할 수 없습니다. 안전한 대화를 부탁드립니다."
+
+define flow hate speech safety
+  user express hate speech
+  bot refuse hate speech
+  stop
+
+define flow general safety
+  user ...
+  if $is_unsafe
+    bot "위험한 콘텐츠가 감지되었습니다. 안전 가이드라인에 따라 처리할 수 없습니다."
+    stop

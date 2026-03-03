@@ -1,0 +1,22 @@
+# NeMo Guardrails Configuration
+models:
+  - type: main
+    engine: openai
+    model: gpt-4o-mini
+
+rails:
+  # Input rails
+  input:
+    flows:
+      - greeting
+      - jailbreak protection
+      - hate speech safety
+
+  # Output rails
+  output:
+    flows:
+      - handle refusal
+      - enforce tool format
+
+# Path to the Colang files (implicitly the same directory)
+# This config.yml ties the .co files together.

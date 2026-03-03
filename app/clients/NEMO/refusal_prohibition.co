@@ -1,0 +1,17 @@
+# Refusal prohibition flow
+define bot express refusal
+  "실행할 수 없습니다"
+  "지원하지 않습니다"
+  "죄송합니다"
+  "알 수 없습니다"
+  "권한이 없습니다"
+
+define bot avoid refusal
+  "요청하신 내용을 처리하기 위해 필요한 기능을 확인하고 실행하겠습니다."
+  "사용자님의 요청을 수행하기 위해 적절한 도구를 호출하겠습니다."
+
+define flow handle refusal
+  bot express refusal
+  bot avoid refusal
+  # Reroute to a tool call or standard procedure instead of just refusing
+  execute_in_sandbox
