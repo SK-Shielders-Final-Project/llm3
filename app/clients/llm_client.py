@@ -4,11 +4,16 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable
+from typing import Any, Callable
 
-import httpx
+# ── LLM 호출 시퀀스 카운터 (로그 식별용) ──
+_llm_call_seq = 0
+_llm_call_lock = threading.Lock()
 
 
 @dataclass
@@ -30,51 +35,12 @@ class LlmClient:
     외부에서 호출 함수를 주입받아 사용한다.
     """
 
-    def __init__(
-        self,
-        completion_func: Callable[[list[dict], list[dict]], Any],
-        stream_completion_func: Callable[[list[dict], list[dict]], AsyncIterator[str]] | None = None,
-    ) -> None:
+    def __init__(self, completion_func: Callable[[list[dict], list[dict]], Any]) -> None:
         self._completion_func = completion_func
-        self._stream_completion_func = stream_completion_func
 
     def create_completion(self, messages: list[dict], tools: list[dict]) -> LlmResponse:
         raw = self._completion_func(messages, tools)
         return normalize_response(raw)
-
-    async def create_completion_stream(self, messages: list[dict], tools: list[dict]) -> AsyncIterator[str]:
-        if not self._stream_completion_func:
-            fallback = self.create_completion(messages, tools)
-            if fallback.content:
-                yield str(fallback.content)
-            return
-        async for chunk in self._stream_completion_func(messages, tools):
-            if chunk:
-                yield chunk
-
-
-_HTTP_CLIENT: httpx.Client | None = None
-_ASYNC_HTTP_CLIENT: httpx.AsyncClient | None = None
-
-
-def _get_http_client() -> httpx.Client:
-    global _HTTP_CLIENT
-    if _HTTP_CLIENT is None:
-        _HTTP_CLIENT = httpx.Client(
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-            headers={"Connection": "keep-alive"},
-        )
-    return _HTTP_CLIENT
-
-
-def _get_async_http_client() -> httpx.AsyncClient:
-    global _ASYNC_HTTP_CLIENT
-    if _ASYNC_HTTP_CLIENT is None:
-        _ASYNC_HTTP_CLIENT = httpx.AsyncClient(
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-            headers={"Connection": "keep-alive"},
-        )
-    return _ASYNC_HTTP_CLIENT
 
 
 def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
@@ -148,6 +114,12 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
         else:
             capped_max_tokens = max(16, min(desired_max_tokens, max(16, available)))
 
+        # ── LLM 호출 번호 부여 ──
+        global _llm_call_seq
+        with _llm_call_lock:
+            _llm_call_seq += 1
+            call_num = _llm_call_seq
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": prepared_messages,
@@ -159,65 +131,43 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             "stream": False,
         }
         logger.info(
-            "LLM max_tokens 캡핑 desired=%s capped=%s max_ctx=%s est_input=%s buffer=%s",
-            desired_max_tokens,
-            capped_max_tokens,
-            max_model_len,
-            est_input_tokens,
-            ctx_buffer,
+            "[LLM #%d] 요청 전송 messages=%d tools=%d",
+            call_num,
+            len(prepared_messages),
+            len(tools or []),
         )
-        if log_verbose:
-            safe_messages = _sanitize_messages(prepared_messages)
-            tool_names = _extract_tool_names(tools or [])
-            logger.info(
-                "LLM 요청 전송 messages=%s tools=%s endpoint=%s",
-                json.dumps(safe_messages, ensure_ascii=False),
-                json.dumps(tool_names, ensure_ascii=False),
-                endpoint,
-            )
-        else:
-            logger.info(
-                "LLM 요청 전송 message_count=%d tool_count=%d endpoint=%s",
-                len(prepared_messages),
-                len(tools or []),
-                endpoint,
-            )
+        data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        client = _get_http_client()
+
+        request = urllib.request.Request(
+            url=endpoint,
+            data=data,
+            headers=headers,
+            method="POST",
+        )
         try:
-            response = client.post(
-                endpoint,
-                json=payload,
-                headers=headers,
-                timeout=timeout_seconds,
-            )
-            if response.status_code >= 400:
-                raise httpx.HTTPStatusError(
-                    f"status={response.status_code}",
-                    request=response.request,
-                    response=response,
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as resp:
+                status_code = resp.status
+                data = json.loads(resp.read().decode("utf-8"))
+                elapsed = time.monotonic() - start
+                logger.info(
+                    "[LLM #%d] 응답 완료 elapsed=%.2fs status=%s",
+                    call_num,
+                    elapsed,
+                    status_code,
                 )
-            data = response.json()
-            elapsed = time.monotonic() - start
-            logger.info(
-                "LLM 응답 성공 elapsed=%.2fs tool_count=%s endpoint=%s",
-                elapsed,
-                len(tools or []),
-                endpoint,
-            )
-            if log_verbose:
-                logger.info("LLM raw 응답=%s", json.dumps(data, ensure_ascii=False))
-            return data
-        except httpx.HTTPStatusError as exc:
-            detail = exc.response.text
-            status_code = exc.response.status_code
+                if log_verbose:
+                    logger.info("LLM raw 응답=%s", json.dumps(data, ensure_ascii=False))
+                return data
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
             tool_count = len(tools or [])
             tool_hint = "tools" if tool_count > 0 else "no-tools"
             logger.error(
                 "LLM 요청 실패(%s) tool_count=%s tool_hint=%s endpoint=%s detail=%s",
-                status_code,
+                exc.code,
                 tool_count,
                 tool_hint,
                 endpoint,
@@ -226,7 +176,7 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
 
             # vLLM/OpenAI 호환 서버에서 max_tokens가 컨텍스트 길이를 초과하면 400으로 떨어진다.
             # 에러 메시지에서 max_ctx/input_tokens를 파싱해 자동으로 낮춰 1회 재시도한다.
-            if status_code == 400 and "maximum context length" in detail.lower():
+            if exc.code == 400 and "maximum context length" in detail.lower():
                 # 예: "'max_tokens' ... maximum context length is 8192 tokens and your request has 405 input tokens ..."
                 ctx_match = re.search(
                     r"maximum context length is\s+(\d+)\s+tokens\s+and your request has\s+(\d+)\s+input tokens",
@@ -250,23 +200,23 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
                         max_ctx,
                         input_tokens,
                     )
-                    retry_response = client.post(
-                        endpoint,
-                        json=payload,
+                    retry_data = json.dumps(payload).encode("utf-8")
+                    retry_request = urllib.request.Request(
+                        url=endpoint,
+                        data=retry_data,
                         headers=headers,
-                        timeout=timeout_seconds,
+                        method="POST",
                     )
-                    retry_response.raise_for_status()
-                    retry_json = retry_response.json()
-                    elapsed = time.monotonic() - start
-                    logger.info(
-                        "LLM 응답 성공(retry) elapsed=%.2fs tool_count=%s endpoint=%s",
-                        elapsed,
-                        len(tools or []),
-                        endpoint,
-                    )
-                    logger.info("LLM raw 응답(retry)=%s", json.dumps(retry_json, ensure_ascii=False))
-                    return retry_json
+                    with urllib.request.urlopen(retry_request, timeout=timeout_seconds) as resp2:
+                        retry_json = json.loads(resp2.read().decode("utf-8"))
+                        elapsed = time.monotonic() - start
+                        logger.info(
+                            "[LLM #%d] 응답 완료(retry) elapsed=%.2fs status=%s",
+                            call_num,
+                            elapsed,
+                            resp2.status,
+                        )
+                        return retry_json
 
             if "roles must alternate" in detail.lower():
                 flattened = _flatten_messages(prepared_messages)
@@ -283,15 +233,16 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
                     "max_tokens": capped2,
                     "stream": False,
                 }
-                logger.warning("LLM 역할 제약 감지: 메시지 평탄화 후 재시도")
-                retry_response = client.post(
-                    endpoint,
-                    json=retry_payload,
+                retry_data = json.dumps(retry_payload).encode("utf-8")
+                retry_request = urllib.request.Request(
+                    url=endpoint,
+                    data=retry_data,
                     headers=headers,
-                    timeout=timeout_seconds,
+                    method="POST",
                 )
-                retry_response.raise_for_status()
-                return retry_response.json()
+                logger.warning("LLM 역할 제약 감지: 메시지 평탄화 후 재시도")
+                with urllib.request.urlopen(retry_request, timeout=timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
 
             if "auto\" tool choice requires" in detail:
                 raise RuntimeError(
@@ -302,8 +253,8 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
 
             tool_error = "tools" in detail.lower() or "tool" in detail.lower()
             hint = " (tools 미지원 가능성)" if tool_error else ""
-            raise RuntimeError(f"LLM 요청 실패({status_code}){hint}: {detail}") from exc
-        except httpx.RequestError as exc:
+            raise RuntimeError(f"LLM 요청 실패({exc.code}){hint}: {detail}") from exc
+        except urllib.error.URLError as exc:
             elapsed = time.monotonic() - start
             logger.error(
                 "LLM 요청 타임아웃/네트워크 실패 elapsed=%.2fs endpoint=%s error=%s",
@@ -314,101 +265,6 @@ def build_http_completion_func() -> Callable[[list[dict], list[dict]], Any]:
             raise RuntimeError(f"LLM 요청 실패: {exc}") from exc
 
     return _completion
-
-
-def build_http_stream_completion_func() -> Callable[[list[dict], list[dict]], AsyncIterator[str]]:
-    base_url = os.getenv("LLM_BASE_URL")
-    if not base_url:
-        raise RuntimeError("LLM_BASE_URL이 설정되지 않았습니다.")
-    model = os.getenv("MODEL_ID", "RedHatAI/gemma-3-27b-it-quantized.w4a16")
-    temperature_raw = os.getenv("TEMPERATURE", "0.7")
-    top_p_raw = os.getenv("TOP_P", "0.9")
-    max_tokens_raw = os.getenv("MAX_TOKENS", "1024")
-    timeout_raw = os.getenv("LLM_TIMEOUT_SECONDS", "20")
-    temperature = float(temperature_raw) if temperature_raw.strip() else 0.7
-    top_p = float(top_p_raw) if top_p_raw.strip() else 0.9
-    max_tokens = int(max_tokens_raw) if max_tokens_raw.strip() else 1024
-    timeout_seconds = int(timeout_raw) if timeout_raw.strip() else 20
-    base_url = base_url.rstrip("/")
-    endpoint = os.getenv("LLM_CHAT_ENDPOINT", f"{base_url}/chat/completions")
-    api_key = os.getenv("LLM_API_KEY")
-    logger = logging.getLogger("llm_client")
-    use_gemma_message_adapter = os.getenv("USE_GEMMA_MESSAGE_ADAPTER", "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-
-    async def _stream_completion(messages: list[dict], tools: list[dict]) -> AsyncIterator[str]:
-        prepared_messages = _prepare_messages_for_request(
-            messages=messages,
-            model=model,
-            use_gemma_adapter=use_gemma_message_adapter,
-        )
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": prepared_messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        client = _get_async_http_client()
-        logger.info("LLM 스트리밍 요청 시작 endpoint=%s", endpoint)
-        try:
-            async with client.stream(
-                "POST",
-                endpoint,
-                json=payload,
-                headers=headers,
-                timeout=timeout_seconds,
-            ) as response:
-                if response.status_code >= 400:
-                    detail_bytes = await response.aread()
-                    detail = detail_bytes.decode("utf-8", errors="replace")
-                    raise RuntimeError(f"LLM 스트리밍 요청 실패({response.status_code}): {detail}")
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[len("data:") :].strip()
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    chunk = _extract_stream_text_chunk(event)
-                    if chunk:
-                        yield chunk
-        except httpx.RequestError as exc:
-            raise RuntimeError(f"LLM 스트리밍 네트워크 실패: {exc}") from exc
-
-    return _stream_completion
-
-
-def _extract_stream_text_chunk(event: dict[str, Any]) -> str:
-    choices = event.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-    first = choices[0] or {}
-    delta = first.get("delta") or {}
-    content = delta.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    texts.append(text)
-        return "".join(texts)
-    return ""
 
 
 def _flatten_messages(messages: list[dict]) -> list[dict]:
@@ -569,12 +425,7 @@ def normalize_response(raw: Any) -> LlmResponse:
     if isinstance(choice, dict) and message is None and "text" in choice:
         message = choice.get("text")
 
-    logger.info(
-        "LLM normalize_response types raw=%s choice=%s message=%s",
-        type(raw).__name__,
-        type(choice).__name__,
-        type(message).__name__,
-    )
+    # normalize_response 디버그 로그 제거됨
 
     tool_calls_raw = []
     if isinstance(message, dict):

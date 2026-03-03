@@ -8,21 +8,26 @@ import re
 import time
 import uuid
 from types import SimpleNamespace
-from typing import Any, AsyncIterator
+from typing import Any
 
-from app.clients.guardrail_client import GuardrailClient
+from app.clients.aws_guardrail_client import GuardrailClientProtocol
 from app.clients.llm_client import LlmClient
 from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
 from app.service.rag import RagPipeline
 from app.service.mongo.store import store_user_message
+from app.service.mongo.indirection_prompt_search import check_indirection_prompt
 from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
 
 
 # _BLOCKED_CODE_PATTERN = re.compile(
-#     r"(import\s+sys|socket|requests|shutil|rm\s+-rf|"
-#     r"os\.system|__import__|open\(|eval\(|exec\()",
+#     r"(\bimport\s+sys\b|\bimport\s+os\b|\bfrom\s+os\s+import\b|"
+#     r"\bimport\s+subprocess\b|\bfrom\s+subprocess\s+import\b|"
+#     r"\bsocket\b|\brequests\b|\bshutil\b|\brm\s+-rf\b|"
+#     r"\bos\.system\b|\bos\.popen\b|\b__import__\b|"
+#     r"\bopen\s*\(|\beval\s*\(|\bexec\s*\(|"
+#     r"/proc/self|/etc/passwd|\.dockerenv)",
 #     re.IGNORECASE,
 # )
 
@@ -32,10 +37,6 @@ _USER_HIDDEN_KEYS = {"user_id", "admin_level"}
 _PLOT_KEYWORDS_PATTERN = re.compile(r"(그래프|시각화|차트|plot|chart)", re.IGNORECASE)
 _EXECUTION_INTENT_PATTERN = re.compile(
     r"(```|^/|\b(?:python|bash|sh|cmd|powershell|sql|query|코드|실행|명령어|터미널|쉘|스크립트|run)\b)",
-    re.IGNORECASE,
-)
-_COMMAND_FASTPATH_PATTERN = re.compile(
-    r"(^\s*(?:python|bash|sh|cmd|powershell|ls|cat|grep|curl|wget|pip|npm|git|docker)\b|```|[;&|]{2}|^/[a-zA-Z0-9_/\.-]+)",
     re.IGNORECASE,
 )
 _IMPORT_PATTERN = re.compile(r"^\s*(?:from|import)\s+([a-zA-Z0-9_\.]+)", re.MULTILINE)
@@ -85,7 +86,7 @@ class Orchestrator:
         llm_client: LlmClient,
         sandbox_client: SandboxClient,
         registry: FunctionRegistry,
-        guardrail_client: GuardrailClient | None = None,
+        guardrail_client: GuardrailClientProtocol | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.sandbox_client = sandbox_client
@@ -96,9 +97,7 @@ class Orchestrator:
     def handle_user_request(self, message: LlmMessage) -> dict[str, Any]:
         logger = logging.getLogger("orchestrator")
         start = time.monotonic()
-        phase_started = start
         user_prompt = self._apply_guardrail_input(message.content, logger=logger)
-        logger.info("phase=input_guardrail elapsed=%.3fs", time.monotonic() - phase_started)
         if not user_prompt.strip():
             elapsed = time.monotonic() - start
             final_text = "안전 정책에 따라 요청을 처리할 수 없습니다. 다른 방식으로 질문해 주세요."
@@ -118,6 +117,34 @@ class Orchestrator:
                 "elapsed_seconds": elapsed,
             }
         
+        # ── Indirection Prompt 우회 탐지 (VectorDB 기반) ──
+        ip_result = check_indirection_prompt(user_prompt)
+        if ip_result["blocked"]:
+            elapsed = time.monotonic() - start
+            final_text = "답변이 불가능한 내용입니다."
+            logger.warning(
+                "Indirection Prompt 차단 user_id=%s score=%.4f threshold=%.2f elapsed=%.2fs matched=%s",
+                message.user_id,
+                ip_result["score"],
+                ip_result["threshold"],
+                elapsed,
+                ip_result["matched_content"][:100] if ip_result["matched_content"] else "",
+            )
+            self._store_chat_history(
+                user_id=message.user_id,
+                question=message.content,
+                answer=final_text,
+                intent=None,
+                logger=logger,
+            )
+            return {
+                "text": final_text,
+                "model": "indirection_prompt_guard",
+                "tools_used": [],
+                "images": [],
+                "elapsed_seconds": elapsed,
+            }
+
         # Prompt Injection 테스트: "시스템 프롬프트" 류 요청은 RAG/도구 경로로 보내지 않고
         # 여기서 바로 처리해 응답이 흔들리지 않게 만든다.
         vulnerable_prompt_injection = os.getenv("VULNERABLE_PROMPT_INJECTION", "false").strip().lower() in {
@@ -170,45 +197,21 @@ class Orchestrator:
             }
         # 취약 모드 + 간접 요청 → 필터를 통과해 LLM에 도달 (아래 계속)
 
-        rag_plan: dict[str, Any] = {}
-        rag_context = ""
-        if self._should_skip_rag_lookup(user_prompt):
-            logger.info("phase=rag_plan skipped reason=command_fastpath")
-        else:
-            phase_started = time.monotonic()
-            rag_plan = self.rag_pipeline.plan_tool_selection(
-                question=user_prompt,
+        rag_plan = self.rag_pipeline.plan_tool_selection(
+            question=user_prompt,
+            user_id=message.user_id,
+            admin_level=getattr(message, "admin_level", None),
+        )
+        decision = rag_plan.get("decision") or {}
+        if decision.get("data_source") == "vector_only":
+            rag_result = self.rag_pipeline.answer_from_plan(
+                question=message.content,
                 user_id=message.user_id,
+                plan=rag_plan,
                 admin_level=getattr(message, "admin_level", None),
-                apply_input_guardrail=False,
             )
-            logger.info("phase=rag_plan elapsed=%.3fs", time.monotonic() - phase_started)
-            decision = rag_plan.get("decision") or {}
-            if decision.get("data_source") == "vector_only":
-                if self._should_force_sandbox_by_llm(user_prompt=user_prompt):
-                    logger.info("phase=rag_answer_vector_only bypassed reason=llm_sandbox_decision")
-                    rag_context = rag_plan.get("context", "")
-                else:
-                    phase_started = time.monotonic()
-                    rag_result = self.rag_pipeline.answer_from_plan(
-                        question=message.content,
-                        user_id=message.user_id,
-                        plan=rag_plan,
-                        admin_level=getattr(message, "admin_level", None),
-                        apply_input_guardrail=False,
-                        apply_output_guardrail=True,
-                    )
-                    logger.info("phase=rag_answer_vector_only elapsed=%.3fs", time.monotonic() - phase_started)
-                    elapsed = time.monotonic() - start
-                    # vector_only는 이미 RAG에서 최종 답변을 생성하므로 오케스트레이터의
-                    # 추가 LLM 계획/후처리 단계를 생략해 지연을 줄인다.
-                    return {
-                        "text": rag_result.get("answer", ""),
-                        "model": "rag-vector-only",
-                        "tools_used": [],
-                        "images": [],
-                        "elapsed_seconds": elapsed,
-                    }
+            rag_context = rag_result.get("answer", "")
+        else:
             rag_context = rag_plan.get("context", "")
 
         ## 시스템 프롬프트와 도구 스키마 준비
@@ -239,9 +242,7 @@ class Orchestrator:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
-        phase_started = time.monotonic()
         response = self.llm_client.create_completion(messages=messages, tools=tools)
-        logger.info("phase=llm_tool_plan elapsed=%.3fs", time.monotonic() - phase_started)
 
         ## 도구 호출이 없으면 바로 자연어 응답 반환
         tool_calls = response.tool_calls or []
@@ -253,22 +254,44 @@ class Orchestrator:
             except Exception as e:
                 logger.warning("텍스트에서 도구 호출 추출 실패: %s", e)
         
-        # LLM이 tool_calls를 쓰지 않고 코드만 텍스트로 반환해도,
-        # "실행 의도"는 LLM이 이미 표현한 것으로 보고 샌드박스로 연결한다.
-        if not tool_calls and response.content:
-            sandbox_args = self._derive_sandbox_args_from_llm_response(
-                response_content=response.content,
-                user_prompt=user_prompt,
+        # LLM이 거부한 경우만 강제 실행 (키워드 기반 감지 없음, LLM 판단 존중)
+        if not tool_calls:
+            response_lower = (response.content or "").lower()
+            
+            # 기능 안내 질문인지 확인
+            is_feature_question = any(word in message.content.lower() for word in [
+                '기능', '할 수 있', '무엇', '뭐 할', 'feature', 'what can', 'capabilities'
+            ])
+            
+            # 거부 응답 감지 (기능 질문이 아닌 경우만)
+            if not is_feature_question:
+                is_refusal = any(phrase in response_lower for phrase in [
+                    '실행할 수 없', '지원하지 않', '제공할 수 없', '처리할 수 없',
+                    'cannot execute', 'not supported', 'not available', '죄송합니다',
+                    # NOTE: 아래처럼 너무 일반적인 단어(예: "명령어")는 기능 설명에도 자주 등장해
+                    # 오탐이 나서 불필요한 샌드박스 강제 호출을 유발한다.
+                    '명령어를 실행할 수 없', '구문이 잘못되'
+                ])
+                if is_refusal:
+                    if self._should_force_sandbox(message.content):
+                        logger.info("LLM 거부 감지 - execute_in_sandbox 강제 호출: %s", message.content)
+                        tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments={"task": user_prompt})]
+                    else:
+                        logger.info("LLM 거부 감지했지만 실행 의도 없음 - 샌드박스 강제 호출 생략: %s", message.content)
+
+        if not tool_calls:
+            fallback_calls = self._build_fallback_tool_calls_from_plan(
+                rag_plan=rag_plan,
+                user_id=message.user_id,
             )
-            if not sandbox_args and self._should_force_sandbox_by_llm(
-                user_prompt=user_prompt,
-                llm_response=response.content,
-            ):
-                # 코드 추출이 실패해도 LLM이 실행이 필요하다고 판단하면 샌드박스로 폴백한다.
-                sandbox_args = {"task": user_prompt}
-            if sandbox_args:
-                logger.info("LLM 코드 응답 감지 - execute_in_sandbox로 강제 연결")
-                tool_calls = [SimpleNamespace(name="execute_in_sandbox", arguments=sandbox_args)]
+            if fallback_calls:
+                logger.info(
+                    "의도 기반 fallback 도구 호출 적용 intent=%s decision=%s tools=%s",
+                    rag_plan.get("intent"),
+                    rag_plan.get("decision"),
+                    [c.name for c in fallback_calls],
+                )
+                tool_calls = fallback_calls
         
         if not tool_calls:
             fallback_text = response.content or rag_context or "요청에 대한 답변을 생성할 수 없습니다."
@@ -278,7 +301,7 @@ class Orchestrator:
                 final_text = "요청에 대한 답변을 생성할 수 없습니다."
             elapsed = time.monotonic() - start
             logger.info(
-                "LLM 최종 응답 elapsed=%.2fs",
+                "[완료] 전체 처리 elapsed=%.2fs",
                 elapsed,
             )
             self._store_chat_history(
@@ -303,65 +326,25 @@ class Orchestrator:
         allowed_tool_names.discard(None)
 
         ## 도구 실행 루프
-        phase_started = time.monotonic()
         for call in tool_calls:
-            tool_name = self._normalize_tool_name(call.name)
-            if tool_name != call.name:
-                logger.info("도구 별칭 정규화: %s -> %s", call.name, tool_name)
-            if tool_name not in allowed_tool_names:
-                # 등록되지 않은 도구 이름이라도 실행형 요청이면 샌드박스로 강제 우회한다.
-                fallback_args: dict[str, Any] = {}
-                try:
-                    parsed_unknown = self._parse_args(call.arguments)
-                    task = (
-                        parsed_unknown.get("task")
-                        or parsed_unknown.get("query")
-                        or parsed_unknown.get("description")
-                        or message.content
-                    )
-                    fallback_args["task"] = task
-                    if parsed_unknown.get("code"):
-                        fallback_args["code"] = parsed_unknown.get("code")
-                    if parsed_unknown.get("inputs") is not None:
-                        fallback_args["inputs"] = parsed_unknown.get("inputs")
-                    if parsed_unknown.get("required_packages") is not None:
-                        fallback_args["required_packages"] = parsed_unknown.get("required_packages")
-                except Exception:
-                    fallback_args = {"task": message.content}
-
-                if self._should_force_sandbox_by_llm(
-                    user_prompt=message.content,
-                    llm_response=f"{call.name}({call.arguments})",
-                ):
-                    logger.warning(
-                        "알 수 없는 도구 호출을 execute_in_sandbox로 우회 tool=%s",
-                        tool_name,
-                    )
-                    tool_name = "execute_in_sandbox"
-                    call = SimpleNamespace(name=tool_name, arguments=fallback_args)
-                else:
-                    # 실행형이 아니면 기존처럼 에러로 기록한다.
-                    logger.warning("알 수 없는 도구 호출 무시 tool=%s args=%s", tool_name, getattr(call, "arguments", None))
-                    results.append({"tool": tool_name, "error": "Unknown function"})
-                    tools_used.append(tool_name)
-                    continue
-
-            if tool_name not in allowed_tool_names:
-                logger.warning("허용되지 않은 도구 호출 차단 tool=%s", tool_name)
-                results.append({"tool": tool_name, "error": "Unknown function"})
-                tools_used.append(tool_name)
+            if call.name not in allowed_tool_names:
+                # LLM이 print(), len() 같은 내장 함수를 "도구"로 착각하는 경우가 있다.
+                # 실제로 실행 가능한 도구만 실행하고 나머지는 결과에만 기록한다.
+                logger.warning("알 수 없는 도구 호출 무시 tool=%s args=%s", call.name, getattr(call, "arguments", None))
+                results.append({"tool": call.name, "error": "Unknown function"})
+                tools_used.append(call.name)
                 continue
             try:
                 args = self._parse_args(call.arguments)
             except Exception as e:
-                logger.error("도구 인자 파싱 실패 tool=%s args=%s error=%s", tool_name, call.arguments, e)
-                results.append({"tool": tool_name, "error": f"인자 파싱 실패: {e}"})
+                logger.error("도구 인자 파싱 실패 tool=%s args=%s error=%s", call.name, call.arguments, e)
+                results.append({"tool": call.name, "error": f"인자 파싱 실패: {e}"})
                 continue
 
             # ── _normalize_params가 "query" → "task"로 변환하는 것을 되돌림 ──
             # execute_sql_readonly, search_knowledge는 "query" 파라미터를 사용하므로
             # execute_in_sandbox 전용 변환(query→task)이 적용되면 안 된다.
-            if tool_name in ("execute_sql_readonly", "search_knowledge"):
+            if call.name in ("execute_sql_readonly", "search_knowledge"):
                 if "task" in args and "query" not in args:
                     args["query"] = args.pop("task")
 
@@ -372,24 +355,24 @@ class Orchestrator:
                 "VULNERABLE_EXCESSIVE_AGENCY", "false"
             ).strip().lower() in {"true", "1", "yes"}
 
-            if tool_name == "execute_sql_readonly" and vulnerable_excessive_agency:
+            if call.name == "execute_sql_readonly" and vulnerable_excessive_agency:
                 # LLM 판단에 의존: user_id를 강제 오버라이드하지 않음
                 # LLM이 SQL에 :user_id를 포함하지 않으면 전체 사용자 데이터 조회 가능
                 if "user_id" not in args and message.user_id is not None:
                     args["user_id"] = message.user_id
                 logger.warning(
                     "[VULN] Excessive Agency: user_id 오버라이드 우회 tool=%s user_id=%s",
-                    tool_name, args.get("user_id"),
+                    call.name, args.get("user_id"),
                 )
             else:
                 if message.user_id is not None:
                     args["user_id"] = message.user_id
-            if tool_name == "search_knowledge" and "query" not in args:
+            if call.name == "search_knowledge" and "query" not in args:
                 args["query"] = message.content
             # ── admin_level 기반 접근 제어: get_user_profile에 admin_level 전달 ──
-            if tool_name == "get_user_profile":
+            if call.name == "get_user_profile":
                 args["admin_level"] = getattr(message, "admin_level", None) or 0
-            if tool_name == "execute_in_sandbox":
+            if call.name == "execute_in_sandbox":
                 run_id = uuid.uuid4().hex
                 task = args.get("task") or args.get("description") or args.get("query")
                 if not task:
@@ -412,6 +395,12 @@ class Orchestrator:
                     code,
                 )
                 self._validate_code(code)
+                code_allowed, blocked_reason = self._guard_sandbox_code(code, logger=logger)
+                if not code_allowed:
+                    logger.warning("Sandbox 실행 차단 tool=%s reason=%s", call.name, blocked_reason)
+                    results.append({"tool": call.name, "error": blocked_reason})
+                    tools_used.append(call.name)
+                    continue
                 required_packages = args.get("required_packages", []) or []
                 inferred_packages = self._infer_packages_from_code(code)
                 if inferred_packages:
@@ -427,49 +416,27 @@ class Orchestrator:
                         user_id=message.user_id,
                         run_id=run_id,
                     )
-                    results.append({"tool": tool_name, "result": sandbox_result})
+                    results.append({"tool": call.name, "result": sandbox_result})
                 except Exception as exc:
-                    logger.exception("Sandbox 실행 실패 tool=%s", tool_name)
-                    results.append({"tool": tool_name, "error": str(exc)})
-                tools_used.append(tool_name)
+                    logger.exception("Sandbox 실행 실패 tool=%s", call.name)
+                    results.append({"tool": call.name, "error": str(exc)})
+                tools_used.append(call.name)
                 continue
             
             try:
-                result = self.registry.execute(tool_name, **args)
+                result = self.registry.execute(call.name, **args)
                 ## 결과 모음 - admin_level 기반 민감 필드 필터링
-                results.append({"tool": tool_name, "result": self._sanitize_payload(
+                results.append({"tool": call.name, "result": self._sanitize_payload(
                     result, admin_level=getattr(message, "admin_level", None) or 0
                 )})
             except Exception as exc:
-                logger.exception("도구 실행 실패 tool=%s", tool_name)
-                results.append({"tool": tool_name, "error": str(exc)})
-            tools_used.append(tool_name)
-        logger.info("phase=tool_execution elapsed=%.3fs tools=%d", time.monotonic() - phase_started, len(tools_used))
+                logger.exception("도구 실행 실패 tool=%s", call.name)
+                results.append({"tool": call.name, "error": str(exc)})
+            tools_used.append(call.name)
 
         safe_results_for_prompt = self._sanitize_payload(
             results, admin_level=getattr(message, "admin_level", None) or 0
         )
-        if self._can_skip_final_llm_for_tools(tools_used):
-            elapsed = time.monotonic() - start
-            final_text = self._format_fallback_results(safe_results_for_prompt)
-            final_text = self._sanitize_text(final_text, admin_level=getattr(message, "admin_level", None) or 0)
-            final_text = self._apply_guardrail_output(final_text, logger=logger)
-            self._store_chat_history(
-                user_id=message.user_id,
-                question=message.content,
-                answer=final_text,
-                intent=rag_plan.get("intent"),
-                logger=logger,
-            )
-            logger.info("phase=llm_final_response skipped reason=tool_fastpath elapsed=%.3fs", elapsed)
-            return {
-                "text": final_text,
-                "model": "tool-fastpath",
-                "tools_used": tools_used,
-                "images": [],
-                "elapsed_seconds": elapsed,
-            }
-
         final_user_content = (
             f"사용자 요청: {message.content}\n"
             f"\n함수 실행 결과:\n{json.dumps(safe_results_for_prompt, ensure_ascii=False, indent=2, default=str)}\n"
@@ -498,12 +465,10 @@ class Orchestrator:
         ]
 
         ## LLM의 2차 응답
-        phase_started = time.monotonic()
         final_response = self.llm_client.create_completion(messages=final_messages, tools=[])
-        logger.info("phase=llm_final_response elapsed=%.3fs", time.monotonic() - phase_started)
         elapsed = time.monotonic() - start
         logger.info(
-            "LLM 최종 응답 elapsed=%.2fs",
+            "[완료] 전체 처리 elapsed=%.2fs",
             elapsed,
         )
         final_text = self._sanitize_text(
@@ -529,24 +494,6 @@ class Orchestrator:
             "images": [],
             "elapsed_seconds": elapsed,
         }
-
-    async def stream_user_request(self, message: LlmMessage) -> AsyncIterator[str]:
-        """
-        스트리밍 경로에서도 도구 오케스트레이션을 동일하게 적용한다.
-        코드 실행 요청은 반드시 execute_in_sandbox를 거쳐 실행 결과를 반환한다.
-        """
-        logger = logging.getLogger("orchestrator")
-        try:
-            result = self.handle_user_request(message)
-        except Exception:
-            logger.exception("스트리밍 오케스트레이션 응답 생성 실패")
-            yield "\n요청 처리 중 오류가 발생했습니다."
-            return
-
-        final_text = (result.get("text") or "").strip()
-        if not final_text:
-            final_text = "요청에 대한 답변을 생성할 수 없습니다."
-        yield final_text
 
 
     def _store_chat_history(
@@ -784,19 +731,7 @@ class Orchestrator:
         return tool_calls
 
     def _is_known_tool_name(self, name: str) -> bool:
-        normalized = self._normalize_tool_name(name)
-        return bool(_KNOWN_TOOL_NAME_PATTERN.match((normalized or "").strip()))
-
-    def _normalize_tool_name(self, name: str | None) -> str:
-        normalized = (name or "").strip()
-        aliases = {
-            "run_python_code": "execute_in_sandbox",
-            "run_code": "execute_in_sandbox",
-            "execute_python": "execute_in_sandbox",
-            "execute_python_code": "execute_in_sandbox",
-            "python_exec": "execute_in_sandbox",
-        }
-        return aliases.get(normalized, normalized)
+        return bool(_KNOWN_TOOL_NAME_PATTERN.match((name or "").strip()))
 
     def _parse_tool_code_block(self, block: str) -> list[Any]:
         """
@@ -1133,36 +1068,57 @@ class Orchestrator:
         inputs: dict[str, Any] | None,
         results: list[dict[str, Any]],
     ) -> str:
-        payload = inputs if inputs is not None else {"results": results, "task": task}
-        payload = self._sanitize_payload(payload)
-        encoded = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        prelude = (
-            "import base64\n"
-            "import json\n"
-            "import os\n"
-            "import subprocess\n"  # subprocess 추가
-            "import sys\n"  # sys 추가
-            "import matplotlib\n"
-            "matplotlib.use('Agg')\n"
-            "import matplotlib.pyplot as plt\n"
-            f"inputs = json.loads(base64.b64decode('{base64.b64encode(encoded).decode('ascii')}').decode('utf-8'))\n"
-        )
-        if code:
-            return f"{prelude}\n{code}"
-        return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
+        raw_code = (code or "").strip()
+
+        # 기본 경로: 단순 코드 실행 요청은 LLM 생성 코드를 그대로 사용한다.
+        # (기존의 공통 prelude 주입 때문에 base64/os/subprocess/matplotlib가 불필요하게 항상 추가되던 문제를 방지)
+        if raw_code and inputs is None:
+            return raw_code
+
+        prelude_lines: list[str] = []
+        if inputs is not None:
+            payload = self._sanitize_payload(inputs)
+            encoded = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+            prelude_lines.extend(
+                [
+                    "import base64",
+                    "import json",
+                    f"inputs = json.loads(base64.b64decode('{base64.b64encode(encoded).decode('ascii')}').decode('utf-8'))",
+                ]
+            )
+
+        # 시각화 코드에서만 matplotlib prelude를 보강한다.
+        lowered = raw_code.lower()
+        needs_matplotlib = ("plt." in raw_code) or ("matplotlib" in lowered)
+        if needs_matplotlib:
+            prelude_lines.extend(
+                [
+                    "import matplotlib",
+                    "matplotlib.use('Agg')",
+                    "import matplotlib.pyplot as plt",
+                ]
+            )
+
+        prelude = "\n".join(prelude_lines).strip()
+        body = raw_code or "print('실행할 코드가 없습니다.')"
+        if prelude:
+            return f"{prelude}\n\n{body}"
+        return body
 
     def _validate_code(self, code: str) -> None:
         # Sandbox Evasion 취약점: 코드 검증 완화
         vulnerable_sandbox = os.getenv("VULNERABLE_SANDBOX_EVASION", "false").strip().lower() in {"true", "1", "yes"}
-        
-        if vulnerable_sandbox:
-            return  # 모든 코드 허용
-        
-        # 기본 모드에서는 검증 비활성화 (교육 목적)
-        pass
+
+        # 최소 차단 규칙은 취약 모드에서도 항상 적용한다.
         # pattern = globals().get("_BLOCKED_CODE_PATTERN")
         # if pattern and pattern.search(code):
         #     raise ValueError("Sandbox 코드에 금지된 키워드가 포함되어 있습니다.")
+
+        if vulnerable_sandbox:
+            return  # 최소 차단 외 검증은 완화
+
+        # 기본 모드에서는 추가 검증을 여기에 확장한다.
+        pass
 
     def _sanitize_payload(self, payload: Any, admin_level: int = 0) -> Any:
         # Sensitive Information Disclosure 취약점: 민감정보 필터링 완화
@@ -1271,48 +1227,114 @@ class Orchestrator:
             return False
         return bool(_SYSTEM_PROMPT_INDIRECT_PATTERN.search(text))
 
+    def _get_guardrail_provider(self) -> str:
+        """현재 활성 가드레일 provider 이름을 반환한다."""
+        if not self.guardrail_client:
+            return "none"
+        cls_name = type(self.guardrail_client).__name__.lower()
+        if "lakera" in cls_name:
+            return "lakera"
+        if "nemo" in cls_name:
+            return "nemo"
+        if "guardrail" in cls_name:
+            return "aws"
+        return "unknown"
+
     def _apply_guardrail_input(self, text: str, *, logger: logging.Logger) -> str:
         if not self.guardrail_client:
-            logger.info("가드레일 비활성화 상태: 입력 원문 사용")
+            logger.info("[가드레일-입력] 비활성 (provider=none) - 입력 원문 사용")
             return text
+        provider = self._get_guardrail_provider()
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="INPUT")
         except Exception:
-            logger.exception("입력 가드레일 적용 실패 - 원문으로 진행")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("[가드레일-입력] 적용 실패 elapsed=%.2fs provider=%s - 원문으로 진행", g_elapsed, provider)
             return text
+        g_elapsed = time.monotonic() - g_start
         cleaned = (decision.output_text or "").strip()
         changed = cleaned != text.strip() if cleaned else True
         if decision.action != "NONE":
             logger.warning(
-                "입력 가드레일 개입 action=%s changed=%s input_len=%d output_len=%d",
+                "[가드레일-입력] 개입 action=%s changed=%s elapsed=%.2fs provider=%s",
                 decision.action,
                 changed,
-                len(text),
-                len(cleaned),
+                g_elapsed,
+                provider,
             )
         else:
-            logger.info("입력 가드레일 통과 action=NONE input_len=%d", len(text))
+            logger.info("[가드레일-입력] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
         return cleaned
 
     def _apply_guardrail_output(self, text: str, *, logger: logging.Logger) -> str:
         if not self.guardrail_client or not text:
+            if not self.guardrail_client:
+                logger.info("[가드레일-출력] 비활성 (provider=none) - 출력 원문 사용")
             return text
+        provider = self._get_guardrail_provider()
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="OUTPUT")
         except Exception:
-            logger.exception("출력 가드레일 적용 실패 - 기존 응답 유지")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("[가드레일-출력] 적용 실패 elapsed=%.2fs provider=%s - 기존 응답 유지", g_elapsed, provider)
             return text
+        g_elapsed = time.monotonic() - g_start
         cleaned = (decision.output_text or "").strip()
         changed = cleaned != text.strip() if cleaned else True
         if decision.action != "NONE":
             logger.warning(
-                "출력 가드레일 개입 action=%s changed=%s input_len=%d output_len=%d",
+                "[가드레일-출력] 개입 action=%s changed=%s elapsed=%.2fs provider=%s",
                 decision.action,
                 changed,
-                len(text),
-                len(cleaned),
+                g_elapsed,
+                provider,
             )
+        else:
+            logger.info("[가드레일-출력] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
+        # Guardrail이 개입한 경우에는 원문 복구(fallback)하지 않는다.
+        if decision.action != "NONE":
+            return cleaned
         return cleaned or text
+
+    def _guard_sandbox_code(self, code: str, *, logger: logging.Logger) -> tuple[bool, str]:
+        """
+        LLM이 생성한 Sandbox 실행 코드를 GuardRail로 검증한다.
+        action=NONE 인 경우에만 실행을 허용한다.
+        """
+        if not code:
+            return False, "실행할 코드가 비어 있습니다."
+        if not self.guardrail_client:
+            logger.info("[가드레일-코드] 비활성 (provider=none) - 코드 실행 허용")
+            return True, ""
+
+        provider = self._get_guardrail_provider()
+        g_start = time.monotonic()
+        try:
+            decision = self.guardrail_client.apply(text=code, source="OUTPUT")
+        except Exception:
+            g_elapsed = time.monotonic() - g_start
+            logger.exception(
+                "[가드레일-코드] 적용 실패 elapsed=%.2fs provider=%s - fail-close 차단",
+                g_elapsed,
+                provider,
+            )
+            return False, "보안 정책 검증 실패로 Sandbox 실행이 차단되었습니다."
+
+        g_elapsed = time.monotonic() - g_start
+        action = (decision.action or "NONE").upper()
+        if action != "NONE":
+            logger.warning(
+                "[가드레일-코드] 차단 action=%s elapsed=%.2fs provider=%s",
+                action,
+                g_elapsed,
+                provider,
+            )
+            return False, "보안 정책에 의해 Sandbox 코드 실행이 차단되었습니다."
+
+        logger.info("[가드레일-코드] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
+        return True, ""
 
     def _should_force_sandbox(self, text: str | None) -> bool:
         """명시적 실행/명령 의도가 있을 때만 강제 샌드박스 실행."""
@@ -1320,148 +1342,66 @@ class Orchestrator:
             return False
         return bool(_EXECUTION_INTENT_PATTERN.search(text))
 
-    def _should_skip_rag_lookup(self, text: str | None) -> bool:
-        """
-        명령/코드 실행형 요청은 RAG 검색/분류를 생략해 왕복 지연을 줄인다.
-        """
-        if not text:
-            return False
-        enabled = os.getenv("RAG_COMMAND_FASTPATH_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
-        if not enabled:
-            return False
-        return bool(_COMMAND_FASTPATH_PATTERN.search(text))
-
-    def _can_skip_final_llm_for_tools(self, tools_used: list[str]) -> bool:
-        """
-        단일 샌드박스 실행 결과는 최종 LLM 재요약을 생략해 지연을 줄인다.
-        """
-        if not tools_used:
-            return False
-        enabled = os.getenv("TOOL_FASTPATH_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
-        if not enabled:
-            return False
-        unique = set(tools_used)
-        return unique == {"execute_in_sandbox"} and len(tools_used) == 1
-
-    def _derive_sandbox_args_from_llm_response(
+    def _build_fallback_tool_calls_from_plan(
         self,
         *,
-        response_content: str,
-        user_prompt: str,
-    ) -> dict[str, Any] | None:
-        """
-        정규표현식 기반 사용자 입력 필터 없이, LLM 응답 자체를 신뢰해
-        코드 응답을 execute_in_sandbox 인자로 변환한다.
-        """
-        lang, fenced = self._extract_first_code_fence(response_content)
-        if fenced:
-            normalized_lang = (lang or "").lower()
-            shell_langs = {"bash", "sh", "shell", "cmd", "powershell"}
-            if normalized_lang in shell_langs:
-                shell_script = json.dumps(fenced, ensure_ascii=False)
-                wrapped = (
-                    "import subprocess\n"
-                    f"result = subprocess.run({shell_script}, shell=True, capture_output=True, text=True)\n"
-                    "output = result.stdout.strip() if result.stdout else result.stderr.strip()\n"
-                    "print(output if output else '[출력 없음]')\n"
-                )
-                return {"task": user_prompt, "code": wrapped}
-            return {"task": user_prompt, "code": fenced}
-
-        # 코드블록이 없어도 LLM이 코드 본문만 반환하는 경우를 처리한다.
-        if self._looks_like_raw_code(response_content):
-            return {"task": user_prompt, "code": response_content.strip()}
-        return None
-
-    def _extract_first_code_fence(self, content: str) -> tuple[str | None, str | None]:
-        if not content:
-            return None, None
-        # ```python\n...\n``` 와 ```python ...```(같은 줄 시작) 모두 허용
-        fence_pattern = re.compile(r"```([a-zA-Z0-9_-]*)\s*([\s\S]*?)```")
-        preferred_langs = {
-            "python",
-            "py",
-            "bash",
-            "sh",
-            "shell",
-            "cmd",
-            "powershell",
-        }
-        fallback: tuple[str | None, str | None] = (None, None)
-
-        for match in fence_pattern.finditer(content):
-            lang = (match.group(1) or "").strip().lower() or None
-            body = (match.group(2) or "").strip()
-            if not body:
-                continue
-            # 언어 태그가 붙은 코드블록을 우선 채택
-            if lang in preferred_langs:
-                return lang, body
-            if fallback == (None, None):
-                fallback = (lang, body)
-        return fallback
-
-    def _looks_like_raw_code(self, content: str) -> bool:
-        text = (content or "").strip()
-        if not text:
-            return False
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if len(lines) < 2:
-            return False
-        code_markers = (
-            "import ",
-            "from ",
-            "def ",
-            "class ",
-            "print(",
-            "subprocess.run(",
-            "for ",
-            "while ",
-            "=",
-        )
-        score = 0
-        for line in lines[:20]:
-            if line.startswith("#"):
-                continue
-            if any(marker in line for marker in code_markers):
-                score += 1
-        return score >= 2
-
-    def _should_force_sandbox_by_llm(
-        self,
-        *,
-        user_prompt: str,
-        llm_response: str | None = None,
-    ) -> bool:
-        """
-        실행 필요 여부를 정규식 키워드가 아닌 LLM 판별로 결정한다.
-        """
-        system_prompt = (
-            "너는 실행 라우팅 판별기다. 사용자 요청이 실행(코드/명령어 실행, 계산, 파일/시스템 조작) "
-            "대상인지 판별하라. 반드시 JSON 하나만 출력하라: "
-            "{\"execute_in_sandbox\": true|false}. 추가 텍스트 금지."
-        )
-        user_content = (
-            f"사용자 요청:\n{user_prompt}\n\n"
-            f"LLM 응답(있으면 참고):\n{llm_response or ''}\n"
-        )
+        rag_plan: dict[str, Any],
+        user_id: int | None,
+    ) -> list[Any]:
+        if user_id is None:
+            return []
         try:
-            decision = self.llm_client.create_completion(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                tools=[],
-            )
-            content = (decision.content or "").strip()
-            if not content:
-                return False
-            payload_text = self._strip_code_fences(content).strip()
-            parsed = json.loads(payload_text)
-            return bool(parsed.get("execute_in_sandbox"))
-        except Exception:
-            logging.getLogger("orchestrator").exception("LLM 기반 실행 라우팅 판별 실패")
-            return False
+            normalized_user_id = int(user_id)
+        except (TypeError, ValueError):
+            return []
+        if normalized_user_id <= 0:
+            return []
+
+        intent = rag_plan.get("intent") or {}
+        decision = rag_plan.get("decision") or {}
+        intent_name = str(intent.get("intent") or "")
+        data_source = str(decision.get("data_source") or intent.get("data_source") or "")
+        tables = {str(name) for name in (intent.get("mysql_tables") or []) if name}
+        allowlist = [str(name) for name in (rag_plan.get("tool_allowlist") or []) if name]
+
+        # vector_only는 DB 도구 실행 없이 자연어/문서 기반 응답을 우선한다.
+        if data_source == "vector_only":
+            return []
+
+        def _call(name: str, args: dict[str, Any]) -> list[Any]:
+            return [SimpleNamespace(name=name, arguments=args)]
+
+        if intent_name == "personal_data":
+            if "rentals" in tables:
+                return _call("get_rentals", {"user_id": normalized_user_id, "days": 30})
+            if "payments" in tables:
+                return _call("get_payments", {"user_id": normalized_user_id, "limit": 20})
+            if "inquiries" in tables:
+                return _call("get_inquiries", {"user_id": normalized_user_id})
+            if "users" in tables or "get_user_profile" in allowlist:
+                return _call("get_user_profile", {"user_id": normalized_user_id})
+            return _call("get_user_profile", {"user_id": normalized_user_id})
+
+        if "rentals" in tables:
+            return _call("get_rentals", {"user_id": normalized_user_id, "days": 30})
+        if "payments" in tables:
+            return _call("get_payments", {"user_id": normalized_user_id, "limit": 20})
+        if "inquiries" in tables:
+            return _call("get_inquiries", {"user_id": normalized_user_id})
+        if "users" in tables:
+            return _call("get_user_profile", {"user_id": normalized_user_id})
+
+        for tool_name in allowlist:
+            if tool_name == "get_rentals":
+                return _call("get_rentals", {"user_id": normalized_user_id, "days": 30})
+            if tool_name == "get_payments":
+                return _call("get_payments", {"user_id": normalized_user_id, "limit": 20})
+            if tool_name == "get_inquiries":
+                return _call("get_inquiries", {"user_id": normalized_user_id})
+            if tool_name == "get_user_profile":
+                return _call("get_user_profile", {"user_id": normalized_user_id})
+        return []
+
 
     def _format_fallback_results(self, results: list[dict[str, Any]]) -> str:
         if not results:

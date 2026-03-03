@@ -1,0 +1,25 @@
+models:
+  - type: main
+    engine: legacy_openai
+    model: meta/llama-3.1-8b-instruct
+    parameters:
+      openai_api_base: "https://integrate.api.nvidia.com/v1"
+
+rails:
+  # Input rails
+  input:
+    flows:
+      - greeting
+      - jailbreak protection
+      - hate speech safety
+      - code execution protection
+
+  # Output rails
+  output:
+    flows:
+      - output code execution protection
+      - handle refusal
+      - enforce tool format
+
+# Path to the Colang files (implicitly the same directory)
+# This config.yml ties the .co files together.

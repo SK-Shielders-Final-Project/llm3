@@ -5,7 +5,6 @@ import os
 import threading
 import time
 import urllib.request
-import json
 
 from dotenv import load_dotenv
 from typing import Any
@@ -13,14 +12,9 @@ from typing import Any
 load_dotenv(override=True)
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import StreamingResponse
 
-from app.clients.guardrail_client import build_guardrail_client_from_env
-from app.clients.llm_client import (
-    LlmClient,
-    build_http_completion_func,
-    build_http_stream_completion_func,
-)
+from app.clients.aws_guardrail_client import build_guardrail_client_from_env
+from app.clients.llm_client import LlmClient, build_http_completion_func
 from app.clients.sandbox_client import SandboxClient
 from app.orchestrator import Orchestrator
 from app.service.registry import FunctionRegistry
@@ -37,6 +31,12 @@ _concurrent_lock = threading.Lock()
 _peak_concurrent = 0  # 최대 동시 요청 수 기록
 
 
+class _SuppressNemoDebugFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return "[NEMO-DEBUG]" not in message
+
+
 def configure_logging() -> None:
     base_dir = os.path.dirname(__file__)
     log_dir = os.path.join(base_dir, "log")
@@ -51,6 +51,22 @@ def configure_logging() -> None:
         ],
         force=True,
     )
+
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_SuppressNemoDebugFilter())
+
+    # ── HuggingFace / sentence-transformers 불필요 로그 억제 ──
+    for noisy_logger in (
+        "nemoguardrails",
+        "transformers",
+        "sentence_transformers",
+        "huggingface_hub",
+        "tokenizers",
+        "filelock",
+        "urllib3",
+        "httpx",
+    ):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
 configure_logging()
@@ -135,8 +151,7 @@ def _build_vram_exceeded_message(
 
 def create_orchestrator() -> Orchestrator:
     llm_completion = build_http_completion_func()
-    llm_stream_completion = build_http_stream_completion_func()
-    llm_client = LlmClient(llm_completion, stream_completion_func=llm_stream_completion)
+    llm_client = LlmClient(llm_completion)
     sandbox_url = os.getenv("SANDBOX_SERVER_URL", "")
     sandbox_timeout_raw = os.getenv("SANDBOX_TIMEOUT_SECONDS", "60")
     sandbox_timeout = int(sandbox_timeout_raw) if sandbox_timeout_raw.strip() else 60
@@ -208,16 +223,12 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     main_logger.info("동시 요청 수: %d (최대: %d)", current_concurrent, _peak_concurrent)
 
     # ── 요청 전 GPU VRAM 상태 기록 (delta 계산용) ──
-    t0 = time.monotonic()
     vram_before = vram_monitor.snapshot()
-    main_logger.info("phase=vram_before_snapshot elapsed=%.3fs", time.monotonic() - t0)
     vram_after: dict[str, Any] | None = None
 
     start = time.monotonic()
     try:
-        t_orch = time.monotonic()
         result = orchestrator.handle_user_request(message)
-        main_logger.info("phase=orchestrator elapsed=%.3fs", time.monotonic() - t_orch)
     except Exception as exc:
         import traceback
         elapsed = time.monotonic() - start
@@ -225,6 +236,16 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
         error_detail = f"{type(exc).__name__}: {error_str}"
 
         main_logger.error("요청 처리 실패: %s\n%s", error_detail, traceback.format_exc())
+
+        
+        if isinstance(exc, ValueError) and "Sandbox 코드에 금지된 키워드" in error_str:
+            response.headers["X-LLM3-Error"] = "INVALID_SANDBOX_COMMAND"
+            return GenerateResponse(
+                text="실행 불가능한 명령입니다.",
+                model="sandbox_validator",
+                tools_used=[],
+                images=[],
+            )
 
         # ── LLM 서버가 죽었는지 확인 (VRAM 고갈 = 모델 다운) ──
         is_llm_error = any(kw in error_str for kw in [
@@ -284,9 +305,7 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
 
         # ── 요청 후 GPU VRAM 상태 로그 ──
         if vram_after is None:
-            t1 = time.monotonic()
             vram_after = vram_monitor.snapshot()
-            main_logger.info("phase=vram_after_snapshot elapsed=%.3fs", time.monotonic() - t1)
         if vram_before and vram_after:
             delta = vram_after["used_mb"] - vram_before["used_mb"]
             main_logger.info(
@@ -321,43 +340,6 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
         model=result.get("model", "unknown"),
         tools_used=result.get("tools_used", []),
         images=result.get("images", []),
-    )
-
-
-@app.post("/api/generate/stream")
-async def generate_stream(request: GenerateRequest) -> StreamingResponse:
-    """
-    저지연 스트리밍(SSE) 응답.
-    - text/event-stream
-    - vLLM stream=true 사용
-    """
-    if request.message is not None:
-        message = request.message
-    elif request.user_id is not None and request.comment:
-        message = LlmMessage(role="user", user_id=request.user_id, content=request.comment)
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="요청 형식이 올바르지 않습니다. message 또는 comment/user_id를 제공하세요.",
-        )
-
-    async def _event_generator():
-        try:
-            async for chunk in orchestrator.stream_user_request(message):
-                yield f"event: token\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
-            yield "event: done\ndata: {}\n\n"
-        except Exception as exc:
-            payload = {"error": str(exc)}
-            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(
-        _event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
     )
 
 

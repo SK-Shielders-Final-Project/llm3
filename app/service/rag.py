@@ -4,12 +4,13 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
-from app.clients.guardrail_client import GuardrailClient
+from app.clients.aws_guardrail_client import GuardrailClientProtocol
 from app.clients.llm_client import LlmClient
 from app.service.mongo.search import search_knowledge
 from app.service.mongo.store import store_user_message
@@ -83,7 +84,7 @@ class RagPipeline:
         self,
         llm_client: LlmClient,
         weights: RagWeights | None = None,
-        guardrail_client: GuardrailClient | None = None,
+        guardrail_client: GuardrailClientProtocol | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.weights = weights or RagWeights()
@@ -726,10 +727,12 @@ class RagPipeline:
     def _apply_guardrail_input(self, text: str) -> str:
         if not self.guardrail_client:
             return text
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="INPUT")
         except Exception:
-            logger.exception("RAG 입력 가드레일 적용 실패 - 원문 유지")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("RAG 입력 가드레일 적용 실패 elapsed=%.2fs - 원문 유지", g_elapsed)
             return text
         cleaned = (decision.output_text or "").strip()
         return cleaned or text
@@ -737,10 +740,12 @@ class RagPipeline:
     def _apply_guardrail_output(self, text: str) -> str:
         if not self.guardrail_client:
             return text
+        g_start = time.monotonic()
         try:
             decision = self.guardrail_client.apply(text=text, source="OUTPUT")
         except Exception:
-            logger.exception("RAG 출력 가드레일 적용 실패 - 원문 유지")
+            g_elapsed = time.monotonic() - g_start
+            logger.exception("RAG 출력 가드레일 적용 실패 elapsed=%.2fs - 원문 유지", g_elapsed)
             return text
         cleaned = (decision.output_text or "").strip()
         return cleaned or text

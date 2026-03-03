@@ -1,0 +1,17 @@
+# Basic interaction flow
+define user express greeting
+  "hello"
+  "hi"
+  "안녕"
+  "반가워"
+
+define bot explain greeting
+  "안녕하세요! 모빌리티 서비스 도우미입니다. 무엇을 도와드릴까요?"
+
+define flow greeting
+  user express greeting
+  bot explain greeting
+
+define flow main
+  user ...
+  bot ...

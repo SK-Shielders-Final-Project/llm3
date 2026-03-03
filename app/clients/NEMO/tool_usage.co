@@ -1,0 +1,12 @@
+# Tool usage enforcement
+define bot use wrong tool format
+  "search_knowledge(...)"
+  "get_rentals(...)"
+
+define bot correct tool usage
+  "도구 호출은 OpenAI tool_calls 형식을 따릅니다."
+
+define flow enforce tool format
+  bot use wrong tool format
+  bot correct tool usage
+  stop
