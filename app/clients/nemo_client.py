@@ -1,8 +1,5 @@
 import os
 import logging
-import asyncio
-from typing import Any
-from nemoguardrails import RailsConfig, LLMRails
 from app.clients.aws_guardrail_client import GuardrailDecision
 
 class NemoClient:
@@ -19,24 +16,6 @@ class NemoClient:
             # Move imports inside to catch missing dependency errors during build
             self._logger.info("[NEMO-DEBUG] Importing nemoguardrails...")
             from nemoguardrails import RailsConfig, LLMRails
-            from nemoguardrails.llm.providers import register_llm_provider
-            
-            # Register a custom provider that uses the legacy ChatOpenAI from langchain_community
-            # This avoids the requirement for the 'langchain-openai' package
-            from langchain_community.chat_models import ChatOpenAI
-            
-            class LegacyOpenAIChat(ChatOpenAI):
-                """A simple wrapper to allow registration as a provider."""
-                def __init__(self, **kwargs):
-                    # Remove parameters that might not be supported by ChatOpenAI
-                    kwargs.pop("type", None)
-                    super().__init__(**kwargs)
-
-            try:
-                register_llm_provider("legacy_openai", LegacyOpenAIChat)
-                self._logger.info("[NEMO-DEBUG] Custom provider 'legacy_openai' registered")
-            except Exception as e:
-                self._logger.warning(f"[NEMO-DEBUG] Provider registration failed (might already be registered): {e}")
 
             # Ensure OPENAI_API_KEY is available if we're using the 'openai' engine for NIM
             # NVIDIA NIM API is OpenAI-compatible and often we use the 'openai' engine
@@ -44,6 +23,9 @@ class NemoClient:
             if not os.getenv("OPENAI_API_KEY") and os.getenv("NVIDIA_API_KEY"):
                 self._logger.info("[NEMO-DEBUG] Setting OPENAI_API_KEY from NVIDIA_API_KEY for compatibility")
                 os.environ["OPENAI_API_KEY"] = os.environ["NVIDIA_API_KEY"]
+            if not os.getenv("OPENAI_BASE_URL"):
+                self._logger.info("[NEMO-DEBUG] Setting OPENAI_BASE_URL to NVIDIA NIM endpoint")
+                os.environ["OPENAI_BASE_URL"] = "https://integrate.api.nvidia.com/v1"
 
             # Load configuration from the directory containing config.yml and .co files
             abs_config_path = os.path.abspath(config_path)
