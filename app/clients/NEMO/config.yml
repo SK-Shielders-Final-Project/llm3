@@ -1,8 +1,8 @@
 # NeMo Guardrails Configuration
 models:
   - type: main
-    engine: openai
-    model: gpt-4o-mini
+    engine: nim
+    model: meta/llama-3.1-8b-instruct
 
 rails:
   # Input rails
