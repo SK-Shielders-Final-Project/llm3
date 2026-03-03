@@ -25,14 +25,15 @@ class NemoClient:
             # This avoids the requirement for the 'langchain-openai' package
             from langchain_community.chat_models import ChatOpenAI
             
-            def get_legacy_openai_chat_model(**kwargs):
-                self._logger.info(f"[NEMO-DEBUG] Initializing legacy_openai chat model with args: {kwargs}")
-                # Remove parameters that might not be supported by ChatOpenAI
-                kwargs.pop("type", None)
-                return ChatOpenAI(**kwargs)
+            class LegacyOpenAIChat(ChatOpenAI):
+                """A simple wrapper to allow registration as a provider."""
+                def __init__(self, **kwargs):
+                    # Remove parameters that might not be supported by ChatOpenAI
+                    kwargs.pop("type", None)
+                    super().__init__(**kwargs)
 
             try:
-                register_llm_provider("legacy_openai", get_legacy_openai_chat_model)
+                register_llm_provider("legacy_openai", LegacyOpenAIChat)
                 self._logger.info("[NEMO-DEBUG] Custom provider 'legacy_openai' registered")
             except Exception as e:
                 self._logger.warning(f"[NEMO-DEBUG] Provider registration failed (might already be registered): {e}")
