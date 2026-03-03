@@ -395,6 +395,12 @@ class Orchestrator:
                     code,
                 )
                 self._validate_code(code)
+                code_allowed, blocked_reason = self._guard_sandbox_code(code, logger=logger)
+                if not code_allowed:
+                    logger.warning("Sandbox 실행 차단 tool=%s reason=%s", call.name, blocked_reason)
+                    results.append({"tool": call.name, "error": blocked_reason})
+                    tools_used.append(call.name)
+                    continue
                 required_packages = args.get("required_packages", []) or []
                 inferred_packages = self._infer_packages_from_code(code)
                 if inferred_packages:
@@ -1272,6 +1278,44 @@ class Orchestrator:
         if decision.action != "NONE":
             return cleaned
         return cleaned or text
+
+    def _guard_sandbox_code(self, code: str, *, logger: logging.Logger) -> tuple[bool, str]:
+        """
+        LLM이 생성한 Sandbox 실행 코드를 GuardRail로 검증한다.
+        action=NONE 인 경우에만 실행을 허용한다.
+        """
+        if not code:
+            return False, "실행할 코드가 비어 있습니다."
+        if not self.guardrail_client:
+            logger.info("[가드레일-코드] 비활성 (provider=none) - 코드 실행 허용")
+            return True, ""
+
+        provider = self._get_guardrail_provider()
+        g_start = time.monotonic()
+        try:
+            decision = self.guardrail_client.apply(text=code, source="OUTPUT")
+        except Exception:
+            g_elapsed = time.monotonic() - g_start
+            logger.exception(
+                "[가드레일-코드] 적용 실패 elapsed=%.2fs provider=%s - fail-close 차단",
+                g_elapsed,
+                provider,
+            )
+            return False, "보안 정책 검증 실패로 Sandbox 실행이 차단되었습니다."
+
+        g_elapsed = time.monotonic() - g_start
+        action = (decision.action or "NONE").upper()
+        if action != "NONE":
+            logger.warning(
+                "[가드레일-코드] 차단 action=%s elapsed=%.2fs provider=%s",
+                action,
+                g_elapsed,
+                provider,
+            )
+            return False, "보안 정책에 의해 Sandbox 코드 실행이 차단되었습니다."
+
+        logger.info("[가드레일-코드] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
+        return True, ""
 
     def _should_force_sandbox(self, text: str | None) -> bool:
         """명시적 실행/명령 의도가 있을 때만 강제 샌드박스 실행."""
