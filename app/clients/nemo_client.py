@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from app.clients.aws_guardrail_client import GuardrailDecision
 
 class NemoClient:
@@ -16,6 +17,28 @@ class NemoClient:
             # Move imports inside to catch missing dependency errors during build
             self._logger.info("[NEMO-DEBUG] Importing nemoguardrails...")
             from nemoguardrails import RailsConfig, LLMRails
+            from nemoguardrails.llm.providers import register_llm_provider
+
+            # Register a compatibility provider for environments without langchain-openai.
+            # Newer nemoguardrails requires providers to expose async _acall.
+            from langchain_community.chat_models import ChatOpenAI  # type: ignore[reportMissingImports]
+
+            class LegacyOpenAIChat(ChatOpenAI):
+                def __init__(self, **kwargs):
+                    kwargs.pop("type", None)
+                    super().__init__(**kwargs)
+
+                async def _acall(self, prompt: str, stop=None, run_manager=None, **kwargs):
+                    loop = asyncio.get_running_loop()
+                    return await loop.run_in_executor(
+                        None, lambda: self._call(prompt, stop=stop, run_manager=run_manager, **kwargs)
+                    )
+
+            try:
+                register_llm_provider("legacy_openai", LegacyOpenAIChat)
+                self._logger.info("[NEMO-DEBUG] Custom provider 'legacy_openai' registered")
+            except Exception as e:
+                self._logger.warning(f"[NEMO-DEBUG] Provider registration failed (might already be registered): {e}")
 
             # Ensure OPENAI_API_KEY is available if we're using the 'openai' engine for NIM
             # NVIDIA NIM API is OpenAI-compatible and often we use the 'openai' engine
@@ -74,9 +97,11 @@ class NemoClient:
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor() as executor:
                     future = executor.submit(asyncio.run, self.rails.generate_async(prompt=text))
-                    response_text = future.result()
+                    raw_response = future.result()
             else:
-                response_text = loop.run_until_complete(self.rails.generate_async(prompt=text))
+                raw_response = loop.run_until_complete(self.rails.generate_async(prompt=text))
+
+            response_text = raw_response if isinstance(raw_response, str) else str(raw_response)
 
             self._logger.info(f"[NEMO-DEBUG] Rails response received (first 50 chars): {response_text[:50]}...")
             
