@@ -38,11 +38,31 @@ define user attempt code execution
   "import base64\nimport json\nimport os\nimport subprocess"
   "os.makedirs(\"/mnt\", exist_ok=True)"
   "os.listdir('/mnt')"
+  "chroot /mnt/bin/bash -c"
+  "cat /etc/os-release"
+  "shell=True"
+  "/mnt/bin/bash"
+  "/etc/os-release"
+
+define bot output code execution
+  "import os"
+  "import subprocess"
+  "subprocess.run("
+  "shell=True"
+  "chroot /mnt/bin/bash -c"
+  "cat /etc/os-release"
+  "os.listdir(\"/mnt\")"
+  "os.listdir('/mnt')"
 
 define bot refuse code execution
   "죄송합니다. 보안 정책상 시스템 명령어나 파이썬 코드 실행과 관련된 요청은 처리할 수 없습니다. 안전한 범위 내에서 다른 도움을 드릴까요?"
 
 define flow code execution protection
   user attempt code execution
+  bot refuse code execution
+  stop
+
+define flow output code execution protection
+  bot output code execution
   bot refuse code execution
   stop

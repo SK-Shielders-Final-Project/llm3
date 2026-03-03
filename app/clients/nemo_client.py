@@ -18,8 +18,20 @@ _REFUSAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_COMMAND_PATTERN = re.compile(
-    r"(mkdir\s+-p\s+/mnt|ls\s+/mnt|os\.makedirs\(\s*[\"']?/mnt|os\.listdir\(\s*[\"']?/mnt|subprocess\.(run|Popen)|os\.(system|popen)\()",
+    r"(mkdir\s+-p\s+/mnt|ls\s+/mnt|os\.makedirs\(\s*[\"']?/mnt|os\.listdir\(\s*[\"']?/mnt|subprocess\.(run|Popen)|os\.(system|popen)\(|chroot\s+/\S+|bash\s+-c\s+[\"']|sh\s+-c\s+[\"']|python\s+-c\s+[\"']|shell\s*=\s*true|cat\s+/etc/os-release|cat\s+/etc/passwd|cat\s+/etc/shadow|base64\.b64decode\()",
     re.IGNORECASE,
+)
+_CODE_BLOCK_PATTERN = re.compile(r"```(?:python|bash|sh)?\s+.*?```", re.IGNORECASE | re.DOTALL)
+_HIGH_RISK_CODE_KEYWORDS = (
+    "import subprocess",
+    "subprocess.run(",
+    "shell=True",
+    "os.system(",
+    "os.popen(",
+    "chroot ",
+    "/etc/os-release",
+    "/etc/passwd",
+    "/etc/shadow",
 )
 _SENSITIVE_PATH_PATTERN = re.compile(
     r"(/(?:etc|proc|sys|dev|root|home|var|usr|bin|sbin|lib|lib64|mnt)\b)",
@@ -47,6 +59,7 @@ _SYSTEM_LISTING_TOKENS = {
     "srv",
 }
 _BLOCKED_OUTPUT_MESSAGE = "보안 정책상 시스템 경로/명령 실행 결과는 제공할 수 없습니다."
+_BLOCKED_INPUT_MESSAGE = ""
 
 
 class _LegacyOpenAICompatProvider:
@@ -222,6 +235,19 @@ class NemoClient:
             len(text),
         )
 
+        if normalized_source == "INPUT" and self._contains_execution_intent(text):
+            self._logger.warning("[NEMO-DEBUG] BLOCK source=%s execution_intent_precheck=True", normalized_source)
+            return GuardrailDecision(
+                action="BLOCK",
+                output_text=_BLOCKED_INPUT_MESSAGE,
+                raw={
+                    "provider": "nemo",
+                    "source": normalized_source,
+                    "blocked_by_execution_intent": True,
+                    "phase": "precheck",
+                },
+            )
+
         if normalized_source == "OUTPUT" and self._contains_sensitive_output(text):
             self._logger.warning("[NEMO-DEBUG] BLOCK source=%s sensitive_output_precheck=True", normalized_source)
             return GuardrailDecision(
@@ -288,10 +314,14 @@ class NemoClient:
             )
         except Exception as exc:
             self._logger.exception("[NEMO-DEBUG] apply failed source=%s error=%s", normalized_source, exc)
-            # 실패 시 fail-close: 입력은 차단, 출력은 원문 유지
+            # 실패 시 fail-close: 입력/출력 모두 차단
             if normalized_source == "INPUT":
                 return GuardrailDecision(action="BLOCK", output_text="", raw={"error": str(exc), "provider": "nemo"})
-            return GuardrailDecision(action="NONE", output_text=text, raw={"error": str(exc), "provider": "nemo"})
+            return GuardrailDecision(
+                action="BLOCK",
+                output_text=_BLOCKED_OUTPUT_MESSAGE,
+                raw={"error": str(exc), "provider": "nemo"},
+            )
 
     def _generate_with_rails(self, text: str) -> Any:
         async def _run() -> Any:
@@ -330,6 +360,8 @@ class NemoClient:
             return False
         if _SENSITIVE_COMMAND_PATTERN.search(text):
             return True
+        if self._contains_high_risk_code_block(text):
+            return True
 
         has_sensitive_path = bool(_SENSITIVE_PATH_PATTERN.search(text))
         if not has_sensitive_path:
@@ -344,7 +376,29 @@ class NemoClient:
         if "디렉토리 생성 성공" in text and ("파일/디렉토리 목록" in text or "목록" in text):
             return True
 
+        lowered = text.lower()
+        if "chroot" in lowered and ("/etc/" in lowered or "/mnt/" in lowered):
+            return True
+
         return False
+
+    def _contains_execution_intent(self, text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        if _SENSITIVE_COMMAND_PATTERN.search(text):
+            return True
+        if any(keyword in lowered for keyword in _HIGH_RISK_CODE_KEYWORDS):
+            return True
+        return False
+
+    def _contains_high_risk_code_block(self, text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        if not _CODE_BLOCK_PATTERN.search(text):
+            return False
+        return any(keyword in lowered for keyword in _HIGH_RISK_CODE_KEYWORDS)
 
 
 def build_nemo_client() -> NemoClient | None:

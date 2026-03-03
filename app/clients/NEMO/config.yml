@@ -17,6 +17,7 @@ rails:
   # Output rails
   output:
     flows:
+      - output code execution protection
       - handle refusal
       - enforce tool format
 
