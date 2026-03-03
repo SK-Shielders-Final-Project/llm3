@@ -58,6 +58,9 @@ _TOOL_CALL_FENCE_PATTERN = re.compile(r"```tool_call\s*(\{.+?\})\s*```", re.DOTA
 _TOOL_CALLS_FENCE_PATTERN = re.compile(
     r"```tool_calls\s*(\{.+?\}|\[.+?\])\s*```", re.DOTALL | re.IGNORECASE
 )
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "execute_python_code": "execute_in_sandbox",
+}
 # 텍스트 파싱 시, 실제로 '도구'일 가능성이 높은 이름만 허용
 _KNOWN_TOOL_NAME_PATTERN = re.compile(
     r"^(?:execute_in_sandbox|execute_sql_readonly|search_knowledge|get_[a-zA-Z0-9_]+)$"
@@ -327,24 +330,29 @@ class Orchestrator:
 
         ## 도구 실행 루프
         for call in tool_calls:
-            if call.name not in allowed_tool_names:
+            raw_tool_name = (call.name or "").strip()
+            tool_name = self._canonicalize_tool_name(raw_tool_name)
+            if tool_name != raw_tool_name:
+                logger.info("도구 별칭 정규화 적용 from=%s to=%s", raw_tool_name, tool_name)
+
+            if tool_name not in allowed_tool_names:
                 # LLM이 print(), len() 같은 내장 함수를 "도구"로 착각하는 경우가 있다.
                 # 실제로 실행 가능한 도구만 실행하고 나머지는 결과에만 기록한다.
-                logger.warning("알 수 없는 도구 호출 무시 tool=%s args=%s", call.name, getattr(call, "arguments", None))
-                results.append({"tool": call.name, "error": "Unknown function"})
-                tools_used.append(call.name)
+                logger.warning("알 수 없는 도구 호출 무시 tool=%s args=%s", tool_name, getattr(call, "arguments", None))
+                results.append({"tool": tool_name, "error": "Unknown function"})
+                tools_used.append(tool_name)
                 continue
             try:
                 args = self._parse_args(call.arguments)
             except Exception as e:
-                logger.error("도구 인자 파싱 실패 tool=%s args=%s error=%s", call.name, call.arguments, e)
-                results.append({"tool": call.name, "error": f"인자 파싱 실패: {e}"})
+                logger.error("도구 인자 파싱 실패 tool=%s args=%s error=%s", tool_name, call.arguments, e)
+                results.append({"tool": tool_name, "error": f"인자 파싱 실패: {e}"})
                 continue
 
             # ── _normalize_params가 "query" → "task"로 변환하는 것을 되돌림 ──
             # execute_sql_readonly, search_knowledge는 "query" 파라미터를 사용하므로
             # execute_in_sandbox 전용 변환(query→task)이 적용되면 안 된다.
-            if call.name in ("execute_sql_readonly", "search_knowledge"):
+            if tool_name in ("execute_sql_readonly", "search_knowledge"):
                 if "task" in args and "query" not in args:
                     args["query"] = args.pop("task")
 
@@ -355,24 +363,24 @@ class Orchestrator:
                 "VULNERABLE_EXCESSIVE_AGENCY", "false"
             ).strip().lower() in {"true", "1", "yes"}
 
-            if call.name == "execute_sql_readonly" and vulnerable_excessive_agency:
+            if tool_name == "execute_sql_readonly" and vulnerable_excessive_agency:
                 # LLM 판단에 의존: user_id를 강제 오버라이드하지 않음
                 # LLM이 SQL에 :user_id를 포함하지 않으면 전체 사용자 데이터 조회 가능
                 if "user_id" not in args and message.user_id is not None:
                     args["user_id"] = message.user_id
                 logger.warning(
                     "[VULN] Excessive Agency: user_id 오버라이드 우회 tool=%s user_id=%s",
-                    call.name, args.get("user_id"),
+                    tool_name, args.get("user_id"),
                 )
             else:
                 if message.user_id is not None:
                     args["user_id"] = message.user_id
-            if call.name == "search_knowledge" and "query" not in args:
+            if tool_name == "search_knowledge" and "query" not in args:
                 args["query"] = message.content
             # ── admin_level 기반 접근 제어: get_user_profile에 admin_level 전달 ──
-            if call.name == "get_user_profile":
+            if tool_name == "get_user_profile":
                 args["admin_level"] = getattr(message, "admin_level", None) or 0
-            if call.name == "execute_in_sandbox":
+            if tool_name == "execute_in_sandbox":
                 run_id = uuid.uuid4().hex
                 task = args.get("task") or args.get("description") or args.get("query")
                 if not task:
@@ -397,9 +405,9 @@ class Orchestrator:
                 self._validate_code(code)
                 code_allowed, blocked_reason = self._guard_sandbox_code(code, logger=logger)
                 if not code_allowed:
-                    logger.warning("Sandbox 실행 차단 tool=%s reason=%s", call.name, blocked_reason)
-                    results.append({"tool": call.name, "error": blocked_reason})
-                    tools_used.append(call.name)
+                    logger.warning("Sandbox 실행 차단 tool=%s reason=%s", tool_name, blocked_reason)
+                    results.append({"tool": tool_name, "error": blocked_reason})
+                    tools_used.append(tool_name)
                     continue
                 required_packages = args.get("required_packages", []) or []
                 inferred_packages = self._infer_packages_from_code(code)
@@ -416,23 +424,23 @@ class Orchestrator:
                         user_id=message.user_id,
                         run_id=run_id,
                     )
-                    results.append({"tool": call.name, "result": sandbox_result})
+                    results.append({"tool": tool_name, "result": sandbox_result})
                 except Exception as exc:
-                    logger.exception("Sandbox 실행 실패 tool=%s", call.name)
-                    results.append({"tool": call.name, "error": str(exc)})
-                tools_used.append(call.name)
+                    logger.exception("Sandbox 실행 실패 tool=%s", tool_name)
+                    results.append({"tool": tool_name, "error": str(exc)})
+                tools_used.append(tool_name)
                 continue
             
             try:
-                result = self.registry.execute(call.name, **args)
+                result = self.registry.execute(tool_name, **args)
                 ## 결과 모음 - admin_level 기반 민감 필드 필터링
-                results.append({"tool": call.name, "result": self._sanitize_payload(
+                results.append({"tool": tool_name, "result": self._sanitize_payload(
                     result, admin_level=getattr(message, "admin_level", None) or 0
                 )})
             except Exception as exc:
-                logger.exception("도구 실행 실패 tool=%s", call.name)
-                results.append({"tool": call.name, "error": str(exc)})
-            tools_used.append(call.name)
+                logger.exception("도구 실행 실패 tool=%s", tool_name)
+                results.append({"tool": tool_name, "error": str(exc)})
+            tools_used.append(tool_name)
 
         safe_results_for_prompt = self._sanitize_payload(
             results, admin_level=getattr(message, "admin_level", None) or 0
@@ -731,7 +739,13 @@ class Orchestrator:
         return tool_calls
 
     def _is_known_tool_name(self, name: str) -> bool:
-        return bool(_KNOWN_TOOL_NAME_PATTERN.match((name or "").strip()))
+        return bool(_KNOWN_TOOL_NAME_PATTERN.match(self._canonicalize_tool_name((name or "").strip())))
+
+    def _canonicalize_tool_name(self, name: str) -> str:
+        normalized = (name or "").strip()
+        if not normalized:
+            return normalized
+        return _TOOL_NAME_ALIASES.get(normalized, normalized)
 
     def _parse_tool_code_block(self, block: str) -> list[Any]:
         """
