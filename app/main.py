@@ -31,6 +31,12 @@ _concurrent_lock = threading.Lock()
 _peak_concurrent = 0  # 최대 동시 요청 수 기록
 
 
+class _SuppressNemoDebugFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return "[NEMO-DEBUG]" not in message
+
+
 def configure_logging() -> None:
     base_dir = os.path.dirname(__file__)
     log_dir = os.path.join(base_dir, "log")
@@ -46,8 +52,12 @@ def configure_logging() -> None:
         force=True,
     )
 
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_SuppressNemoDebugFilter())
+
     # ── HuggingFace / sentence-transformers 불필요 로그 억제 ──
     for noisy_logger in (
+        "nemoguardrails",
         "transformers",
         "sentence_transformers",
         "huggingface_hub",
