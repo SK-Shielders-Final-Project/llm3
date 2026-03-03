@@ -111,34 +111,61 @@ def build_aws_guardrail_client_from_env() -> GuardrailClient | None:
 
 def build_guardrail_client_from_env() -> GuardrailClientProtocol | None:
     logger = logging.getLogger("guardrail_client")
+    print("[DEBUG] build_guardrail_client_from_env() started")
     
     # ── Unified NeMo Guardrails Client ──
-    # Check if NEMO is enabled via any of the previous environment variables
-    nemo_enabled = (
-        _env_true("NEMO_GUARDRAIL_ENABLED", "false") or 
-        _env_true("NEMO_LIBRARY_ENABLED", "false")
-    )
-    
-    if nemo_enabled:
-        from app.clients.nemo_client import build_nemo_client
-        client = build_nemo_client()
-        if client is not None:
-            logger.info("Active guardrail provider=nemo (Unified Client)")
-            return client
-        logger.warning("NeMo guardrail enabled but client init failed; fallback to next provider")
-    
-    if _lakera_enabled():
-        from app.clients.lakera_guardrail_client import build_lakera_guardrail_client_from_env
+    try:
+        nemo_enabled = (
+            _env_true("NEMO_GUARDRAIL_ENABLED", "false") or 
+            _env_true("NEMO_LIBRARY_ENABLED", "false")
+        )
+        print(f"[DEBUG] NEMO status: {nemo_enabled}")
+        
+        if nemo_enabled:
+            print("[DEBUG] Attempting to build NemoClient...")
+            try:
+                from app.clients.nemo_client import build_nemo_client
+                client = build_nemo_client()
+                if client is not None:
+                    logger.info("Active guardrail provider=nemo (Unified Client)")
+                    print("[DEBUG] NemoClient built successfully")
+                    return client
+                print("[DEBUG] NemoClient build returned None")
+                logger.warning("NeMo guardrail enabled but client init failed; fallback to next provider")
+            except Exception as e:
+                print(f"[DEBUG] Error importing/building NemoClient: {e}")
+                logger.exception(f"Error initializing NemoClient: {e}")
+    except Exception as e:
+        print(f"[DEBUG] Error checking NEMO status: {e}")
 
-        client = build_lakera_guardrail_client_from_env()
+    try:
+        lakera_enabled = _lakera_enabled()
+        print(f"[DEBUG] Lakera status: {lakera_enabled}")
+        if lakera_enabled:
+            from app.clients.lakera_guardrail_client import build_lakera_guardrail_client_from_env
+            client = build_lakera_guardrail_client_from_env()
+            if client is not None:
+                logger.info("Active guardrail provider=lakera")
+                print("[DEBUG] LakeraClient built successfully")
+                return client
+            print("[DEBUG] LakeraClient build returned None")
+            logger.warning("Lakera guardrail enabled but client init failed; fallback to AWS guardrail")
+    except Exception as e:
+        print(f"[DEBUG] Error initializing LakeraClient: {e}")
+
+    try:
+        print("[DEBUG] Attempting to build AWS Guardrail...")
+        client = build_aws_guardrail_client_from_env()
         if client is not None:
-            logger.info("Active guardrail provider=lakera")
+            logger.info("Active guardrail provider=aws")
+            print("[DEBUG] AWS Guardrail built successfully")
             return client
-        logger.warning("Lakera guardrail enabled but client init failed; fallback to AWS guardrail")
-    client = build_aws_guardrail_client_from_env()
-    if client is not None:
-        logger.info("Active guardrail provider=aws")
-    return client
+        print("[DEBUG] AWS Guardrail build returned None")
+    except Exception as e:
+        print(f"[DEBUG] Error initializing AWS Guardrail: {e}")
+
+    print("[DEBUG] build_guardrail_client_from_env() returning None")
+    return None
 
 
 def _extract_output_text(response: dict[str, Any]) -> str | None:

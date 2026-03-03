@@ -14,13 +14,28 @@ class NemoClient:
 
     def __init__(self, config_path: str):
         self._logger = logging.getLogger("guardrail_client")
+        print(f"[DEBUG] NemoClient.__init__ with config_path: {config_path}")
         try:
+            # Move imports inside to catch missing dependency errors during build
+            print("[DEBUG] Importing nemoguardrails...")
+            from nemoguardrails import RailsConfig, LLMRails
+            
             # Load configuration from the directory containing config.yml and .co files
+            print(f"[DEBUG] Loading RailsConfig from {config_path}...")
             self.config = RailsConfig.from_path(config_path)
+            
             # Initialize rails - this will load the configured LLMS
+            print("[DEBUG] Initializing LLMRails...")
             self.rails = LLMRails(self.config)
+            
             self._logger.info(f"NemoClient initialized with config from: {config_path}")
+            print("[DEBUG] NemoClient initialization complete")
+        except ImportError as e:
+            print(f"[DEBUG] nemoguardrails library NOT FOUND: {e}")
+            self._logger.error(f"nemoguardrails library NOT FOUND: {e}")
+            raise
         except Exception as e:
+            print(f"[DEBUG] Failed to initialize NemoClient: {e}")
             self._logger.error(f"Failed to initialize NemoClient: {e}")
             raise
 
@@ -32,36 +47,41 @@ class NemoClient:
         if not text:
             return GuardrailDecision(action="NONE", output_text=text, raw={})
 
+        print(f"[DEBUG] NemoClient.apply source={source} text_len={len(text)}")
         try:
             # NeMo Guardrails library is primarily async. 
             # We wrap it in a sync call for compatibility with the current orchestrator.
-            # In a production environment, it is better to use async throughout.
             
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            import asyncio
             try:
-                response_text = loop.run_until_complete(self.rails.generate_async(prompt=text))
-            finally:
-                loop.close()
-
-            # Determine if the content was blocked.
-            # NeMo Guardrails typically returns a refusal message (e.g., "죄송합니다...") 
-            # or an empty string if it's blocked.
-            action = "NONE"
+                # Try to use existing loop if available (FastAPI might have one)
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             
-            # Simple check: if the response changed significantly or contains refusal keywords
-            # For "INPUT" rails, NeMo often returns the refusal text as the 'generation'
+            print("[DEBUG] Running rails generate_async...")
+            if loop.is_running():
+                # If we are in an async environment, we might need a different approach
+                # but for simplicity in a sync handler:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.rails.generate_async(prompt=text))
+                    response_text = future.result()
+            else:
+                response_text = loop.run_until_complete(self.rails.generate_async(prompt=text))
+
+            print(f"[DEBUG] Rails response: {response_text[:100]}...")
+            
+            action = "NONE"
             if response_text != text:
-                # If it contains refusal keywords or is a known bot refusal message
-                refusal_keywords = ["죄송합니다", "보안 정책", "처리할 수 없", "도움 주기 어렵"]
+                refusal_keywords = ["죄송합니다", "보안 정책", "처리할 수 없", "도움 주기 어렵", "안전한 범위"]
                 if any(kw in response_text for kw in refusal_keywords) or not response_text.strip():
                     action = "BLOCK"
                     self._logger.warning(f"NeMo Guardrail BLOCKED content source={source}. Verdict: {response_text}")
+                    print(f"[DEBUG] Action: BLOCK (refusal detected)")
                 else:
-                    # It might be a regular correction/formatting rail, which we might not want to BLOCK
-                    # but for security we might still want to be cautious.
-                    # Here we follow the logic that if it's not a refusal, it's just modified text.
-                    action = "NONE"
+                    print(f"[DEBUG] Action: NONE (text modified but not refusal)")
 
             return GuardrailDecision(
                 action=action,
@@ -69,24 +89,30 @@ class NemoClient:
                 raw={"provider": "nemo_unified", "source": source, "original_text": text}
             )
         except Exception as e:
+            print(f"[DEBUG] NemoClient.apply error: {e}")
             self._logger.exception(f"NemoClient apply failed: {e}")
-            # Fallback to allow if guardrail fails, to avoid breaking the service,
-            # but this behavior might need to be tightened for high security.
             return GuardrailDecision(action="NONE", output_text=text, raw={"error": str(e)})
 
 def build_nemo_client() -> NemoClient | None:
     """Factory to build the unified NemoClient."""
+    print("[DEBUG] build_nemo_client() called")
     base_dir = os.path.dirname(os.path.dirname(__file__))
     nemo_config_dir = os.path.join(base_dir, "clients", "NEMO")
     
     # Ensure NVIDIA_API_KEY is present if using NIM engine
     if not os.getenv("NVIDIA_API_KEY"):
+        print("[DEBUG] WARNING: NVIDIA_API_KEY is missing")
         logging.getLogger("guardrail_client").warning("NVIDIA_API_KEY is missing. NemoClient might fail to initialize.")
 
     if os.path.exists(nemo_config_dir):
         try:
+            print(f"[DEBUG] Config directory found: {nemo_config_dir}")
             return NemoClient(nemo_config_dir)
         except Exception as e:
+            print(f"[DEBUG] Exception during NemoClient construction: {e}")
             logging.getLogger("guardrail_client").error(f"Failed to build NemoClient: {e}")
             return None
+    
+    print(f"[DEBUG] Config directory NOT FOUND: {nemo_config_dir}")
     return None
+
