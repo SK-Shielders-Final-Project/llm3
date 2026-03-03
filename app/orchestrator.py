@@ -1068,23 +1068,42 @@ class Orchestrator:
         inputs: dict[str, Any] | None,
         results: list[dict[str, Any]],
     ) -> str:
-        payload = inputs if inputs is not None else {"results": results, "task": task}
-        payload = self._sanitize_payload(payload)
-        encoded = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        prelude = (
-            "import base64\n"
-            "import json\n"
-            "import os\n"
-            "import subprocess\n"  # subprocess 추가
-            "import sys\n"  # sys 추가
-            "import matplotlib\n"
-            "matplotlib.use('Agg')\n"
-            "import matplotlib.pyplot as plt\n"
-            f"inputs = json.loads(base64.b64decode('{base64.b64encode(encoded).decode('ascii')}').decode('utf-8'))\n"
-        )
-        if code:
-            return f"{prelude}\n{code}"
-        return f"{prelude}\nprint(json.dumps(inputs, ensure_ascii=False))"
+        raw_code = (code or "").strip()
+
+        # 기본 경로: 단순 코드 실행 요청은 LLM 생성 코드를 그대로 사용한다.
+        # (기존의 공통 prelude 주입 때문에 base64/os/subprocess/matplotlib가 불필요하게 항상 추가되던 문제를 방지)
+        if raw_code and inputs is None:
+            return raw_code
+
+        prelude_lines: list[str] = []
+        if inputs is not None:
+            payload = self._sanitize_payload(inputs)
+            encoded = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+            prelude_lines.extend(
+                [
+                    "import base64",
+                    "import json",
+                    f"inputs = json.loads(base64.b64decode('{base64.b64encode(encoded).decode('ascii')}').decode('utf-8'))",
+                ]
+            )
+
+        # 시각화 코드에서만 matplotlib prelude를 보강한다.
+        lowered = raw_code.lower()
+        needs_matplotlib = ("plt." in raw_code) or ("matplotlib" in lowered)
+        if needs_matplotlib:
+            prelude_lines.extend(
+                [
+                    "import matplotlib",
+                    "matplotlib.use('Agg')",
+                    "import matplotlib.pyplot as plt",
+                ]
+            )
+
+        prelude = "\n".join(prelude_lines).strip()
+        body = raw_code or "print('실행할 코드가 없습니다.')"
+        if prelude:
+            return f"{prelude}\n\n{body}"
+        return body
 
     def _validate_code(self, code: str) -> None:
         # Sandbox Evasion 취약점: 코드 검증 완화
