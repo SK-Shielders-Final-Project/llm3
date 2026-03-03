@@ -62,6 +62,10 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     "execute_python_code": "execute_in_sandbox",
     "execute_code": "execute_in_sandbox",
 }
+_SANDBOX_INTENT_TOOL_PATTERN = re.compile(
+    r"^(?:run|execute|exec|code|python|py|shell|bash|sh|cmd|terminal|agent)[a-z0-9_]*$",
+    re.IGNORECASE,
+)
 # 텍스트 파싱 시, 실제로 '도구'일 가능성이 높은 이름만 허용
 _KNOWN_TOOL_NAME_PATTERN = re.compile(
     r"^(?:execute_in_sandbox|execute_sql_readonly|search_knowledge|get_[a-zA-Z0-9_]+)$"
@@ -336,6 +340,13 @@ class Orchestrator:
             if tool_name != raw_tool_name:
                 logger.info("도구 별칭 정규화 적용 from=%s to=%s", raw_tool_name, tool_name)
 
+            if tool_name not in allowed_tool_names and self._should_force_sandbox_tool(tool_name, message.content):
+                logger.info(
+                    "실행형 도구명 강제 정규화 적용 from=%s to=execute_in_sandbox",
+                    tool_name,
+                )
+                tool_name = "execute_in_sandbox"
+
             if tool_name not in allowed_tool_names:
                 # LLM이 print(), len() 같은 내장 함수를 "도구"로 착각하는 경우가 있다.
                 # 실제로 실행 가능한 도구만 실행하고 나머지는 결과에만 기록한다.
@@ -382,6 +393,8 @@ class Orchestrator:
             if tool_name == "get_user_profile":
                 args["admin_level"] = getattr(message, "admin_level", None) or 0
             if tool_name == "execute_in_sandbox":
+                if "task" not in args:
+                    args["task"] = message.content
                 run_id = uuid.uuid4().hex
                 task = args.get("task") or args.get("description") or args.get("query")
                 if not task:
@@ -748,6 +761,15 @@ class Orchestrator:
             return normalized
         lowered = normalized.lower()
         return _TOOL_NAME_ALIASES.get(lowered, lowered)
+
+    def _should_force_sandbox_tool(self, tool_name: str, user_text: str | None) -> bool:
+        if not tool_name:
+            return False
+        if tool_name == "execute_in_sandbox":
+            return True
+        if not self._should_force_sandbox(user_text):
+            return False
+        return bool(_SANDBOX_INTENT_TOOL_PATTERN.match(tool_name))
 
     def _parse_tool_code_block(self, block: str) -> list[Any]:
         """
