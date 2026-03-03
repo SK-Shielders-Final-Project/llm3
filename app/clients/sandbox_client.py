@@ -44,12 +44,21 @@ class SandboxClient:
     ) -> dict[str, Any]:
         if self.exec_container:
             if self.force_ssh:
-                return self._run_via_ssh_exec(
-                    code=code,
-                    required_packages=required_packages or [],
-                    user_id=user_id,
-                    run_id=run_id,
-                )
+                try:
+                    return self._run_via_ssh_exec(
+                        code=code,
+                        required_packages=required_packages or [],
+                        user_id=user_id,
+                        run_id=run_id,
+                    )
+                except Exception:
+                    # SSH 경로가 깨져 있어도 실행 자체는 가능한 경로로 폴백한다.
+                    return self._run_via_exec(
+                        code=code,
+                        required_packages=required_packages or [],
+                        user_id=user_id,
+                        run_id=run_id,
+                    )
             return self._run_via_exec(
                 code=code,
                 required_packages=required_packages or [],
@@ -151,6 +160,10 @@ class SandboxClient:
     ) -> dict[str, Any]:
         if not self.ssh_key_path:
             raise RuntimeError("SANDBOX_REMOTE_KEY_PATH가 설정되지 않았습니다.")
+        if not os.path.isfile(self.ssh_key_path):
+            raise RuntimeError(
+                f"SANDBOX_REMOTE_KEY_PATH 파일을 찾을 수 없습니다: {self.ssh_key_path}"
+            )
 
         base_dir, code_path = self._build_paths(user_id, run_id)
         encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
