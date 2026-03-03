@@ -222,6 +222,19 @@ class NemoClient:
             len(text),
         )
 
+        if normalized_source == "OUTPUT" and self._contains_sensitive_output(text):
+            self._logger.warning("[NEMO-DEBUG] BLOCK source=%s sensitive_output_precheck=True", normalized_source)
+            return GuardrailDecision(
+                action="BLOCK",
+                output_text=_BLOCKED_OUTPUT_MESSAGE,
+                raw={
+                    "provider": "nemo",
+                    "source": normalized_source,
+                    "blocked_by_sensitive_output": True,
+                    "phase": "precheck",
+                },
+            )
+
         try:
             raw_response = self._generate_with_rails(text)
             output_text = self._extract_text(raw_response).strip()
