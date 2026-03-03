@@ -17,12 +17,6 @@ _REFUSAL_PATTERN = re.compile(
     r"(죄송합니다|처리할 수 없|안전.*(범위|정책)|refuse|cannot comply|not allowed|blocked)",
     re.IGNORECASE,
 )
-_DANGEROUS_INPUT_PATTERN = re.compile(
-    r"(import\s+os|import\s+subprocess|from\s+os\s+import|os\.system|subprocess\.run|eval\(|exec\(|rm\s+-rf|/etc/passwd|/proc/self|system\s*prompt|ignore\s+all\s+previous\s+instructions)",
-    re.IGNORECASE,
-)
-
-
 class _LegacyOpenAICompatProvider:
     """openai 패키지 없이 OpenAI-compatible endpoint 호출."""
 
@@ -203,15 +197,13 @@ class NemoClient:
                 output_text = ""
 
             blocked_by_refusal = bool(_REFUSAL_PATTERN.search(output_text))
-            blocked_by_policy = normalized_source == "INPUT" and bool(_DANGEROUS_INPUT_PATTERN.search(text))
-            blocked = blocked_by_refusal or blocked_by_policy or (normalized_source == "INPUT" and not output_text)
+            blocked = blocked_by_refusal
 
             if blocked:
                 self._logger.warning(
-                    "[NEMO-DEBUG] BLOCK source=%s refusal=%s policy=%s",
+                    "[NEMO-DEBUG] BLOCK source=%s refusal=%s",
                     normalized_source,
                     blocked_by_refusal,
-                    blocked_by_policy,
                 )
                 return GuardrailDecision(
                     action="BLOCK",
@@ -220,9 +212,16 @@ class NemoClient:
                         "provider": "nemo",
                         "source": normalized_source,
                         "blocked_by_refusal": blocked_by_refusal,
-                        "blocked_by_policy": blocked_by_policy,
                         "raw_response": raw_response,
                     },
+                )
+
+            if normalized_source == "INPUT":
+                # 입력 가드레일은 차단 여부만 판단하고, 비차단 시 원문을 유지한다.
+                return GuardrailDecision(
+                    action="NONE",
+                    output_text=text,
+                    raw={"provider": "nemo", "source": normalized_source, "raw_response": raw_response},
                 )
 
             changed = output_text.strip() != text.strip()
