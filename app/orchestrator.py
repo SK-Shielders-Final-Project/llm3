@@ -60,6 +60,7 @@ _TOOL_CALLS_FENCE_PATTERN = re.compile(
 )
 _TOOL_NAME_ALIASES: dict[str, str] = {
     "execute_python_code": "execute_in_sandbox",
+    "execute_code": "execute_in_sandbox",
 }
 # 텍스트 파싱 시, 실제로 '도구'일 가능성이 높은 이름만 허용
 _KNOWN_TOOL_NAME_PATTERN = re.compile(
@@ -745,7 +746,8 @@ class Orchestrator:
         normalized = (name or "").strip()
         if not normalized:
             return normalized
-        return _TOOL_NAME_ALIASES.get(normalized, normalized)
+        lowered = normalized.lower()
+        return _TOOL_NAME_ALIASES.get(lowered, lowered)
 
     def _parse_tool_code_block(self, block: str) -> list[Any]:
         """
