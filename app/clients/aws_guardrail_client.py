@@ -114,12 +114,20 @@ def build_guardrail_client_from_env() -> GuardrailClientProtocol | None:
     # 우선순위: NeMo → Lakera → AWS
     if _nemo_enabled():
         from app.clients.nemo_guardrail import build_nemo_guardrail_client_from_env
-
         client = build_nemo_guardrail_client_from_env()
         if client is not None:
-            logger.info("Active guardrail provider=nemo")
+            logger.info("Active guardrail provider=nemo (NIM API)")
             return client
-        logger.warning("NeMo guardrail enabled but client init failed; fallback to next provider")
+        logger.warning("NeMo guardrail NIM API enabled but client init failed; fallback to next provider")
+    
+    # ── 라이브러리 방식 (Local .co 파일 직접 사용) ──────────────────
+    if _env_true("NEMO_LIBRARY_ENABLED", "false"):
+        from app.clients.nemo_library_client import build_nemo_library_client
+        client = build_nemo_library_client()
+        if client is not None:
+            logger.info("Active guardrail provider=nemo_library (Local .co)")
+            return client
+        logger.warning("NeMo library client enabled but init failed")
     if _lakera_enabled():
         from app.clients.lakera_guardrail_client import build_lakera_guardrail_client_from_env
 
