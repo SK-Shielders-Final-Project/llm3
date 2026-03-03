@@ -14,29 +14,28 @@ class NemoClient:
 
     def __init__(self, config_path: str):
         self._logger = logging.getLogger("guardrail_client")
-        print(f"[DEBUG] NemoClient.__init__ with config_path: {config_path}")
+        self._logger.info(f"[NEMO-DEBUG] NemoClient.__init__ with config_path: {config_path}")
         try:
             # Move imports inside to catch missing dependency errors during build
-            print("[DEBUG] Importing nemoguardrails...")
+            self._logger.info("[NEMO-DEBUG] Importing nemoguardrails...")
             from nemoguardrails import RailsConfig, LLMRails
             
             # Load configuration from the directory containing config.yml and .co files
-            print(f"[DEBUG] Loading RailsConfig from {config_path}...")
-            self.config = RailsConfig.from_path(config_path)
+            abs_config_path = os.path.abspath(config_path)
+            self._logger.info(f"[NEMO-DEBUG] Loading RailsConfig from {abs_config_path}...")
+            self.config = RailsConfig.from_path(abs_config_path)
             
             # Initialize rails - this will load the configured LLMS
-            print("[DEBUG] Initializing LLMRails...")
+            self._logger.info("[NEMO-DEBUG] Initializing LLMRails...")
             self.rails = LLMRails(self.config)
             
-            self._logger.info(f"NemoClient initialized with config from: {config_path}")
-            print("[DEBUG] NemoClient initialization complete")
+            self._logger.info(f"NemoClient initialized with config from: {abs_config_path}")
+            self._logger.info("[NEMO-DEBUG] NemoClient initialization complete")
         except ImportError as e:
-            print(f"[DEBUG] nemoguardrails library NOT FOUND: {e}")
-            self._logger.error(f"nemoguardrails library NOT FOUND: {e}")
+            self._logger.error(f"[NEMO-DEBUG] nemoguardrails library NOT FOUND: {e}")
             raise
         except Exception as e:
-            print(f"[DEBUG] Failed to initialize NemoClient: {e}")
-            self._logger.error(f"Failed to initialize NemoClient: {e}")
+            self._logger.error(f"[NEMO-DEBUG] Failed to initialize NemoClient: {e}")
             raise
 
     def apply(self, *, text: str, source: str) -> GuardrailDecision:
@@ -47,7 +46,7 @@ class NemoClient:
         if not text:
             return GuardrailDecision(action="NONE", output_text=text, raw={})
 
-        print(f"[DEBUG] NemoClient.apply source={source} text_len={len(text)}")
+        self._logger.info(f"[NEMO-DEBUG] NemoClient.apply source={source} text_len={len(text)}")
         try:
             # NeMo Guardrails library is primarily async. 
             # We wrap it in a sync call for compatibility with the current orchestrator.
@@ -60,10 +59,11 @@ class NemoClient:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             
-            print("[DEBUG] Running rails generate_async...")
+            self._logger.info("[NEMO-DEBUG] Running rails generate_async...")
+            
+            # If we are in an async environment, we might need a different approach
+            # Using ThreadPoolExecutor is a common way to run async code in a sync block
             if loop.is_running():
-                # If we are in an async environment, we might need a different approach
-                # but for simplicity in a sync handler:
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor() as executor:
                     future = executor.submit(asyncio.run, self.rails.generate_async(prompt=text))
@@ -71,7 +71,7 @@ class NemoClient:
             else:
                 response_text = loop.run_until_complete(self.rails.generate_async(prompt=text))
 
-            print(f"[DEBUG] Rails response: {response_text[:100]}...")
+            self._logger.info(f"[NEMO-DEBUG] Rails response received (first 50 chars): {response_text[:50]}...")
             
             action = "NONE"
             if response_text != text:
@@ -79,9 +79,9 @@ class NemoClient:
                 if any(kw in response_text for kw in refusal_keywords) or not response_text.strip():
                     action = "BLOCK"
                     self._logger.warning(f"NeMo Guardrail BLOCKED content source={source}. Verdict: {response_text}")
-                    print(f"[DEBUG] Action: BLOCK (refusal detected)")
+                    self._logger.info(f"[NEMO-DEBUG] Action: BLOCK (refusal detected)")
                 else:
-                    print(f"[DEBUG] Action: NONE (text modified but not refusal)")
+                    self._logger.info(f"[NEMO-DEBUG] Action: NONE (text modified but not refusal)")
 
             return GuardrailDecision(
                 action=action,
@@ -89,30 +89,31 @@ class NemoClient:
                 raw={"provider": "nemo_unified", "source": source, "original_text": text}
             )
         except Exception as e:
-            print(f"[DEBUG] NemoClient.apply error: {e}")
+            self._logger.error(f"[NEMO-DEBUG] NemoClient.apply error: {e}")
             self._logger.exception(f"NemoClient apply failed: {e}")
             return GuardrailDecision(action="NONE", output_text=text, raw={"error": str(e)})
 
 def build_nemo_client() -> NemoClient | None:
     """Factory to build the unified NemoClient."""
-    print("[DEBUG] build_nemo_client() called")
-    base_dir = os.path.dirname(os.path.dirname(__file__))
-    nemo_config_dir = os.path.join(base_dir, "clients", "NEMO")
+    logger = logging.getLogger("guardrail_client")
+    logger.info("[NEMO-DEBUG] build_nemo_client() called")
+    
+    # Get the absolute path to the app/clients/NEMO directory
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))
+    nemo_config_dir = os.path.join(current_file_dir, "NEMO")
     
     # Ensure NVIDIA_API_KEY is present if using NIM engine
     if not os.getenv("NVIDIA_API_KEY"):
-        print("[DEBUG] WARNING: NVIDIA_API_KEY is missing")
-        logging.getLogger("guardrail_client").warning("NVIDIA_API_KEY is missing. NemoClient might fail to initialize.")
+        logger.warning("[NEMO-DEBUG] NVIDIA_API_KEY is missing. NemoClient might fail to initialize.")
 
     if os.path.exists(nemo_config_dir):
         try:
-            print(f"[DEBUG] Config directory found: {nemo_config_dir}")
+            logger.info(f"[NEMO-DEBUG] Config directory found: {nemo_config_dir}")
             return NemoClient(nemo_config_dir)
         except Exception as e:
-            print(f"[DEBUG] Exception during NemoClient construction: {e}")
-            logging.getLogger("guardrail_client").error(f"Failed to build NemoClient: {e}")
+            logger.error(f"[NEMO-DEBUG] Exception during NemoClient construction: {e}")
             return None
     
-    print(f"[DEBUG] Config directory NOT FOUND: {nemo_config_dir}")
+    logger.error(f"[NEMO-DEBUG] Config directory NOT FOUND: {nemo_config_dir}")
     return None
 
