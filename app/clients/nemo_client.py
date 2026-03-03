@@ -19,7 +19,24 @@ class NemoClient:
             # Move imports inside to catch missing dependency errors during build
             self._logger.info("[NEMO-DEBUG] Importing nemoguardrails...")
             from nemoguardrails import RailsConfig, LLMRails
+            from nemoguardrails.llm.providers import register_llm_provider
             
+            # Register a custom provider that uses the legacy ChatOpenAI from langchain_community
+            # This avoids the requirement for the 'langchain-openai' package
+            from langchain_community.chat_models import ChatOpenAI
+            
+            def get_legacy_openai_chat_model(**kwargs):
+                self._logger.info(f"[NEMO-DEBUG] Initializing legacy_openai chat model with args: {kwargs}")
+                # Remove parameters that might not be supported by ChatOpenAI
+                kwargs.pop("type", None)
+                return ChatOpenAI(**kwargs)
+
+            try:
+                register_llm_provider("legacy_openai", get_legacy_openai_chat_model)
+                self._logger.info("[NEMO-DEBUG] Custom provider 'legacy_openai' registered")
+            except Exception as e:
+                self._logger.warning(f"[NEMO-DEBUG] Provider registration failed (might already be registered): {e}")
+
             # Ensure OPENAI_API_KEY is available if we're using the 'openai' engine for NIM
             # NVIDIA NIM API is OpenAI-compatible and often we use the 'openai' engine
             # but with a different base_url.

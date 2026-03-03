@@ -1,7 +1,6 @@
-# NeMo Guardrails Configuration
 models:
   - type: main
-    engine: openai
+    engine: legacy_openai
     model: meta/llama-3.1-8b-instruct
     parameters:
       openai_api_base: "https://integrate.api.nvidia.com/v1"
