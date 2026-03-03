@@ -17,6 +17,38 @@ _REFUSAL_PATTERN = re.compile(
     r"(죄송합니다|처리할 수 없|안전.*(범위|정책)|refuse|cannot comply|not allowed|blocked)",
     re.IGNORECASE,
 )
+_SENSITIVE_COMMAND_PATTERN = re.compile(
+    r"(mkdir\s+-p\s+/mnt|ls\s+/mnt|os\.makedirs\(\s*[\"']?/mnt|os\.listdir\(\s*[\"']?/mnt|subprocess\.(run|Popen)|os\.(system|popen)\()",
+    re.IGNORECASE,
+)
+_SENSITIVE_PATH_PATTERN = re.compile(
+    r"(/(?:etc|proc|sys|dev|root|home|var|usr|bin|sbin|lib|lib64|mnt)\b)",
+    re.IGNORECASE,
+)
+_SYSTEM_LISTING_TOKENS = {
+    "boot",
+    "dev",
+    "etc",
+    "proc",
+    "sys",
+    "tmp",
+    "var",
+    "usr",
+    "bin",
+    "sbin",
+    "lib",
+    "lib64",
+    "home",
+    "media",
+    "mnt",
+    "opt",
+    "root",
+    "run",
+    "srv",
+}
+_BLOCKED_OUTPUT_MESSAGE = "보안 정책상 시스템 경로/명령 실행 결과는 제공할 수 없습니다."
+
+
 class _LegacyOpenAICompatProvider:
     """openai 패키지 없이 OpenAI-compatible endpoint 호출."""
 
@@ -197,21 +229,31 @@ class NemoClient:
                 output_text = ""
 
             blocked_by_refusal = bool(_REFUSAL_PATTERN.search(output_text))
-            blocked = blocked_by_refusal
+            blocked_by_sensitive_output = (
+                normalized_source == "OUTPUT" and self._contains_sensitive_output(output_text)
+            )
+            blocked = blocked_by_refusal or blocked_by_sensitive_output
 
             if blocked:
                 self._logger.warning(
-                    "[NEMO-DEBUG] BLOCK source=%s refusal=%s",
+                    "[NEMO-DEBUG] BLOCK source=%s refusal=%s sensitive_output=%s",
                     normalized_source,
                     blocked_by_refusal,
+                    blocked_by_sensitive_output,
                 )
+                blocked_text = ""
+                if normalized_source == "OUTPUT":
+                    blocked_text = _BLOCKED_OUTPUT_MESSAGE
+                elif output_text:
+                    blocked_text = output_text
                 return GuardrailDecision(
                     action="BLOCK",
-                    output_text="" if normalized_source == "INPUT" else (output_text or ""),
+                    output_text=blocked_text,
                     raw={
                         "provider": "nemo",
                         "source": normalized_source,
                         "blocked_by_refusal": blocked_by_refusal,
+                        "blocked_by_sensitive_output": blocked_by_sensitive_output,
                         "raw_response": raw_response,
                     },
                 )
@@ -269,6 +311,27 @@ class NemoClient:
                     if isinstance(msg_content, str):
                         return msg_content
         return str(raw)
+
+    def _contains_sensitive_output(self, text: str) -> bool:
+        if not text:
+            return False
+        if _SENSITIVE_COMMAND_PATTERN.search(text):
+            return True
+
+        has_sensitive_path = bool(_SENSITIVE_PATH_PATTERN.search(text))
+        if not has_sensitive_path:
+            return False
+
+        lowered = text.lower()
+        token_hits = sum(1 for token in _SYSTEM_LISTING_TOKENS if token in lowered)
+        # 파일 시스템 결과처럼 보이는 경우(경로 + 다수의 루트 디렉토리 토큰)만 차단한다.
+        if token_hits >= 5:
+            return True
+
+        if "디렉토리 생성 성공" in text and ("파일/디렉토리 목록" in text or "목록" in text):
+            return True
+
+        return False
 
 
 def build_nemo_client() -> NemoClient | None:

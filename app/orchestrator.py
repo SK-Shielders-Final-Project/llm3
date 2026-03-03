@@ -1268,6 +1268,9 @@ class Orchestrator:
             )
         else:
             logger.info("[가드레일-출력] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
+        # Guardrail이 개입한 경우에는 원문 복구(fallback)하지 않는다.
+        if decision.action != "NONE":
+            return cleaned
         return cleaned or text
 
     def _should_force_sandbox(self, text: str | None) -> bool:
