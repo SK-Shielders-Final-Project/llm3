@@ -37,6 +37,37 @@ _SENSITIVE_PATH_PATTERN = re.compile(
     r"(/(?:etc|proc|sys|dev|root|home|var|usr|bin|sbin|lib|lib64|mnt)\b)",
     re.IGNORECASE,
 )
+_CROSS_USER_ENUMERATION_PATTERN = re.compile(
+    r"(?=.*(사용자|유저|user))"
+    r"(?=.*(id|아이디|username|name|이름|email|이메일|phone|전화번호))"
+    r"(?=.*(포함|들어간|포함된|부분\s*일치|부분일치|like|contains|startswith|endswith|substring|정규식|패턴))"
+    r"(?=.*(조회|검색|출력|보여|목록|리스트|dump|덤프))",
+    re.IGNORECASE,
+)
+_SQL_LIKE_ENUMERATION_PATTERN = re.compile(
+    r"(where\s+\w+\s+like\s+['\"]?%[^%\s]+%['\"]?)",
+    re.IGNORECASE,
+)
+_BULK_USER_DISCLOSURE_PATTERN = re.compile(
+    r"(모든\s*사용자|전체\s*사용자|가입된\s*모든\s*사용자|전체\s*유저|all\s*users|user\s*list)",
+    re.IGNORECASE,
+)
+_EMAIL_PATTERN = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b")
+_PHONE_PATTERN = re.compile(r"\b01[016789][ -]?\d{3,4}[ -]?\d{4}\b")
+_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
+_SENSITIVE_USER_OUTPUT_TOKENS = (
+    "refresh_token",
+    "two_factor_secret",
+    "2fa_secret",
+    "is_2fa_enabled",
+    "created_at",
+    "updated_at",
+    "total_point",
+    "email",
+    "phone",
+    "username",
+    "user_id",
+)
 _SYSTEM_LISTING_TOKENS = {
     "boot",
     "dev",
@@ -59,7 +90,10 @@ _SYSTEM_LISTING_TOKENS = {
     "srv",
 }
 _BLOCKED_OUTPUT_MESSAGE = "보안 정책상 시스템 경로/명령 실행 결과는 제공할 수 없습니다."
-_BLOCKED_INPUT_MESSAGE = ""
+_BLOCKED_INPUT_MESSAGE = (
+    "요청하신 내용은 개인정보/민감정보 유출 가능성이 있어 처리할 수 없습니다. "
+    "부분 문자열/패턴 기반의 사용자 검색 또는 다중 사용자 정보 출력 요청은 차단됩니다."
+)
 
 
 class _LegacyOpenAICompatProvider:
@@ -235,6 +269,19 @@ class NemoClient:
             len(text),
         )
 
+        if normalized_source == "INPUT" and self._contains_cross_user_enumeration_intent(text):
+            self._logger.warning("[NEMO-DEBUG] BLOCK source=%s cross_user_enumeration_precheck=True", normalized_source)
+            return GuardrailDecision(
+                action="BLOCK",
+                output_text=_BLOCKED_INPUT_MESSAGE,
+                raw={
+                    "provider": "nemo",
+                    "source": normalized_source,
+                    "blocked_by_cross_user_enumeration": True,
+                    "phase": "precheck",
+                },
+            )
+
         if normalized_source == "INPUT" and self._contains_execution_intent(text):
             self._logger.warning("[NEMO-DEBUG] BLOCK source=%s execution_intent_precheck=True", normalized_source)
             return GuardrailDecision(
@@ -362,6 +409,8 @@ class NemoClient:
             return True
         if self._contains_high_risk_code_block(text):
             return True
+        if self._contains_user_pii_output(text):
+            return True
 
         has_sensitive_path = bool(_SENSITIVE_PATH_PATTERN.search(text))
         if not has_sensitive_path:
@@ -389,6 +438,35 @@ class NemoClient:
         if _SENSITIVE_COMMAND_PATTERN.search(text):
             return True
         if any(keyword in lowered for keyword in _HIGH_RISK_CODE_KEYWORDS):
+            return True
+        return False
+
+    def _contains_cross_user_enumeration_intent(self, text: str) -> bool:
+        if not text:
+            return False
+        if _CROSS_USER_ENUMERATION_PATTERN.search(text):
+            return True
+        if _SQL_LIKE_ENUMERATION_PATTERN.search(text):
+            return True
+        if _BULK_USER_DISCLOSURE_PATTERN.search(text):
+            return True
+        return False
+
+    def _contains_user_pii_output(self, text: str) -> bool:
+        lowered = text.lower()
+        token_hits = sum(1 for token in _SENSITIVE_USER_OUTPUT_TOKENS if token in lowered)
+        email_hits = len(_EMAIL_PATTERN.findall(text))
+        phone_hits = len(_PHONE_PATTERN.findall(text))
+        has_jwt = bool(_JWT_PATTERN.search(text))
+        has_table_like_user_dump = "|" in text and token_hits >= 3
+
+        if has_jwt:
+            return True
+        if email_hits >= 1 and (phone_hits >= 1 or token_hits >= 2):
+            return True
+        if has_table_like_user_dump:
+            return True
+        if token_hits >= 4:
             return True
         return False
 
