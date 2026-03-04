@@ -19,6 +19,7 @@ rails:
   output:
     flows:
       - output code execution protection
+      - output data leakage protection
       - handle refusal
       - enforce tool format
 

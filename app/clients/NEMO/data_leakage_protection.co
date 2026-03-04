@@ -43,11 +43,48 @@ define user attempt data leakage
   "PII"
   "고객 정보"
   "user_id"
+  "refresh_token"
+  "refresh token"
+  "리프레시 토크"
+  "2FA secret"
+  "2fa_secret"
+  "2FA 비밀키"
+  "created_at"
+  "updated_at"
+  "생성일"
+  "업데이트일"
+  "단어가 들어간"
+  "단어가 포함된"
+  "문자가 포함된"
+  "~인 사용자"
+  "유저 검색"
+  "정보 출력해줘"
+  "id가 있다면"
+  "id를 가진"
+  "메타데이터"
+  "metadata"
 
 define bot refuse data leakage
   "죄송합니다. 요청하신 정보는 보안 가이드라인에 따라 외부에 노출할 수 없는 민감한 데이터(환경 변수, 키, 비밀번호 등)를 포함하고 있어 제공해 드릴 수 없습니다. 다른 일반적인 질문에 대해서는 언제든 도움을 드릴 수 있습니다."
 
 define flow data leakage protection
   user attempt data leakage
+  bot refuse data leakage
+  stop
+
+define bot output data leakage
+  "email:"
+  "phone:"
+  "total_point:"
+  "refresh_token"
+  "2fa_secret"
+  "secret_key"
+  "admin_level"
+  "is_2fa_enabled"
+  "010-"
+  "@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
+
+define flow output data leakage protection
+  bot output data leakage
   bot refuse data leakage
   stop
