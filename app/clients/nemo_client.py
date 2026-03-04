@@ -52,8 +52,16 @@ _BULK_USER_DISCLOSURE_PATTERN = re.compile(
     r"(모든\s*사용자|전체\s*사용자|가입된\s*모든\s*사용자|전체\s*유저|all\s*users|user\s*list)",
     re.IGNORECASE,
 )
+_SAFE_SELF_INFO_REQUEST_PATTERN = re.compile(
+    r"(나의?\s*정보|내\s*정보|본인\s*정보|내\s*프로필|내\s*계정|my\s+(info|information|profile|account)|who\s*am\s*i)",
+    re.IGNORECASE,
+)
+_SELF_INFO_SENSITIVE_REQUEST_PATTERN = re.compile(
+    r"(비밀번호|password|passwd|token|secret|api[_ -]?key|access[_ -]?key|refresh[_ -]?token|2fa|otp|인증키|개인키|private\s*key|환경\s*변수|\.env)",
+    re.IGNORECASE,
+)
 _MULTI_USER_OUTPUT_INDICATOR_PATTERN = re.compile(
-    r"(사용자\s*\d+|총\s*사용자\s*수|전체\s*사용자|목록|리스트|상세\s*정보|핵심\s*항목|user\s*list|all\s*users)",
+    r"(사용자\s*\d+|사용자\s*1|사용자\s*2|총\s*사용자\s*수|전체\s*사용자|가입된\s*모든\s*사용자|user\s*list|all\s*users)",
     re.IGNORECASE,
 )
 _EMAIL_PATTERN = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b")
@@ -284,6 +292,22 @@ class NemoClient:
             len(text),
         )
 
+        if normalized_source == "INPUT" and self._is_safe_self_info_request(text):
+            self._logger.info(
+                "[NEMO-DEBUG] PASS source=%s safe_self_info_request=True",
+                normalized_source,
+            )
+            return GuardrailDecision(
+                action="NONE",
+                output_text=text,
+                raw={
+                    "provider": "nemo",
+                    "source": normalized_source,
+                    "safe_self_info_request": True,
+                    "phase": "precheck",
+                },
+            )
+
         if normalized_source == "INPUT" and self._contains_cross_user_enumeration_intent(text):
             self._logger.warning("[NEMO-DEBUG] BLOCK source=%s cross_user_enumeration_precheck=True", normalized_source)
             return GuardrailDecision(
@@ -467,6 +491,19 @@ class NemoClient:
             return True
         return False
 
+    def _is_safe_self_info_request(self, text: str) -> bool:
+        if not text:
+            return False
+        if not _SAFE_SELF_INFO_REQUEST_PATTERN.search(text):
+            return False
+        if self._contains_cross_user_enumeration_intent(text):
+            return False
+        if self._contains_execution_intent(text):
+            return False
+        if _SELF_INFO_SENSITIVE_REQUEST_PATTERN.search(text):
+            return False
+        return True
+
     def _contains_user_pii_output(self, text: str) -> bool:
         lowered = text.lower()
         sensitive_token_hits = sum(1 for token in _SENSITIVE_USER_OUTPUT_TOKENS if token in lowered)
@@ -476,15 +513,11 @@ class NemoClient:
         phone_hits = len(_PHONE_PATTERN.findall(text))
         has_jwt = bool(_JWT_PATTERN.search(text))
         has_multi_user_indicator = bool(_MULTI_USER_OUTPUT_INDICATOR_PATTERN.search(text))
-        has_table_like_user_dump = "|" in text and (profile_token_hits + sensitive_token_hits) >= 4
-
         if has_jwt or has_always_block_token:
             return True
         if email_hits >= 2 or phone_hits >= 2:
             return True
         if has_multi_user_indicator and (email_hits >= 1 or phone_hits >= 1 or profile_token_hits >= 2):
-            return True
-        if has_table_like_user_dump and (email_hits >= 1 or phone_hits >= 1 or sensitive_token_hits >= 1):
             return True
         if sensitive_token_hits >= 2:
             return True
