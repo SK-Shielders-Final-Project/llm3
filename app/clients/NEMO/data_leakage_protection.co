@@ -89,7 +89,7 @@ define user attempt data leakage
   "데이터 덤프"
 
 define bot refuse data leakage
-  "죄송합니다. 요청하신 정보는 보안 가이드라인에 따라 외부에 노출할 수 없는 민감한 데이터(환경 변수, 키, 비밀번호 등)를 포함하고 있어 제공해 드릴 수 없습니다. 다른 일반적인 질문에 대해서는 언제든 도움을 드릴 수 있습니다."
+  "요청하신 내용은 개인정보/민감정보 유출 가능성이 있어 제공할 수 없습니다. 특히 부분 문자열 검색으로 복수 사용자 정보를 나열하거나 이메일·전화번호·토큰·2FA 관련 값을 출력하는 요청은 차단됩니다. 필요 시 본인 단건 정보만 최소 항목으로 다시 요청해 주세요."
 
 define flow data leakage protection
   user attempt data leakage
