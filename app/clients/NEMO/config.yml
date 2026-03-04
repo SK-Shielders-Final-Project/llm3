@@ -13,6 +13,7 @@ rails:
       - jailbreak protection
       - hate speech safety
       - code execution protection
+      - data leakage protection
 
   # Output rails
   output:
