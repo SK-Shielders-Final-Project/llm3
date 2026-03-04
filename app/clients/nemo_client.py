@@ -52,6 +52,10 @@ _BULK_USER_DISCLOSURE_PATTERN = re.compile(
     r"(모든\s*사용자|전체\s*사용자|가입된\s*모든\s*사용자|전체\s*유저|all\s*users|user\s*list)",
     re.IGNORECASE,
 )
+_MULTI_USER_OUTPUT_INDICATOR_PATTERN = re.compile(
+    r"(사용자\s*\d+|총\s*사용자\s*수|전체\s*사용자|목록|리스트|상세\s*정보|핵심\s*항목|user\s*list|all\s*users)",
+    re.IGNORECASE,
+)
 _EMAIL_PATTERN = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b")
 _PHONE_PATTERN = re.compile(r"\b01[016789][ -]?\d{3,4}[ -]?\d{4}\b")
 _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
@@ -60,6 +64,8 @@ _SENSITIVE_USER_OUTPUT_TOKENS = (
     "two_factor_secret",
     "2fa_secret",
     "is_2fa_enabled",
+)
+_USER_PROFILE_FIELD_TOKENS = (
     "created_at",
     "updated_at",
     "total_point",
@@ -67,6 +73,12 @@ _SENSITIVE_USER_OUTPUT_TOKENS = (
     "phone",
     "username",
     "user_id",
+)
+_BLOCK_ALWAYS_OUTPUT_TOKENS = (
+    "refresh_token",
+    "two_factor_secret",
+    "2fa_secret",
+    "secret_key",
 )
 _SYSTEM_LISTING_TOKENS = {
     "boot",
@@ -89,7 +101,10 @@ _SYSTEM_LISTING_TOKENS = {
     "run",
     "srv",
 }
-_BLOCKED_OUTPUT_MESSAGE = "보안 정책상 시스템 경로/명령 실행 결과는 제공할 수 없습니다."
+_BLOCKED_OUTPUT_MESSAGE = (
+    "보안 정책상 해당 응답은 제공할 수 없습니다. "
+    "시스템 경로/명령 실행 결과 또는 타 사용자 민감정보가 포함될 수 있습니다."
+)
 _BLOCKED_INPUT_MESSAGE = (
     "요청하신 내용은 개인정보/민감정보 유출 가능성이 있어 처리할 수 없습니다. "
     "부분 문자열/패턴 기반의 사용자 검색 또는 다중 사용자 정보 출력 요청은 차단됩니다."
@@ -454,19 +469,24 @@ class NemoClient:
 
     def _contains_user_pii_output(self, text: str) -> bool:
         lowered = text.lower()
-        token_hits = sum(1 for token in _SENSITIVE_USER_OUTPUT_TOKENS if token in lowered)
+        sensitive_token_hits = sum(1 for token in _SENSITIVE_USER_OUTPUT_TOKENS if token in lowered)
+        profile_token_hits = sum(1 for token in _USER_PROFILE_FIELD_TOKENS if token in lowered)
+        has_always_block_token = any(token in lowered for token in _BLOCK_ALWAYS_OUTPUT_TOKENS)
         email_hits = len(_EMAIL_PATTERN.findall(text))
         phone_hits = len(_PHONE_PATTERN.findall(text))
         has_jwt = bool(_JWT_PATTERN.search(text))
-        has_table_like_user_dump = "|" in text and token_hits >= 3
+        has_multi_user_indicator = bool(_MULTI_USER_OUTPUT_INDICATOR_PATTERN.search(text))
+        has_table_like_user_dump = "|" in text and (profile_token_hits + sensitive_token_hits) >= 4
 
-        if has_jwt:
+        if has_jwt or has_always_block_token:
             return True
-        if email_hits >= 1 and (phone_hits >= 1 or token_hits >= 2):
+        if email_hits >= 2 or phone_hits >= 2:
             return True
-        if has_table_like_user_dump:
+        if has_multi_user_indicator and (email_hits >= 1 or phone_hits >= 1 or profile_token_hits >= 2):
             return True
-        if token_hits >= 4:
+        if has_table_like_user_dump and (email_hits >= 1 or phone_hits >= 1 or sensitive_token_hits >= 1):
+            return True
+        if sensitive_token_hits >= 2:
             return True
         return False
 
