@@ -80,6 +80,10 @@ def _env_true(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _lambda_mode_enabled() -> bool:
+    return _env_true("LAMBDA", "false") or _env_true("Lambda", "false")
+
+
 # ── LLM 서버(vLLM) 헬스체크 ──────────────────────────────────
 
 def _is_llm_server_alive() -> bool:
@@ -162,7 +166,7 @@ def create_orchestrator() -> Orchestrator:
     if vulnerable_unbounded:
         sandbox_timeout = 9999  # 매우 긴 타임아웃 허용
 
-    use_lambda_sandbox = _env_true("LAMBDA", "false") or _env_true("Lambda", "false")
+    use_lambda_sandbox = _lambda_mode_enabled()
     if use_lambda_sandbox:
         sandbox_client = LambdaSandboxClient(timeout_seconds=sandbox_timeout)
         logging.getLogger("main").info("Sandbox mode: lambda")
@@ -207,7 +211,7 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
     - 요청 실패 + LLM 서버 다운 → VRAM 고갈로 판단 → 강제 종료 + 상세 로그 클라이언트 전달
     - 요청 성공 후 VRAM이 총량의 N%(VRAM_THRESHOLD_PCT) 초과 → 경고 헤더 추가
     """
-    global _concurrent_requests, _peak_concurrent
+    global _concurrent_requests, _peak_concurrent, orchestrator
 
     if request.message is not None:
         message = request.message
@@ -221,6 +225,17 @@ def generate(request: GenerateRequest, response: Response) -> GenerateResponse:
 
     main_logger = logging.getLogger("main")
     vram_logger = logging.getLogger("vram_monitor")
+
+    # .env 변경 후 서버 재시작 전에도 실행 모드를 안전하게 동기화한다.
+    expected_lambda_mode = _lambda_mode_enabled()
+    actual_lambda_mode = isinstance(orchestrator.sandbox_client, LambdaSandboxClient)
+    if expected_lambda_mode != actual_lambda_mode:
+        main_logger.warning(
+            "Sandbox mode mismatch detected expected_lambda=%s actual_lambda=%s; recreating orchestrator",
+            expected_lambda_mode,
+            actual_lambda_mode,
+        )
+        orchestrator = create_orchestrator()
 
     # ── 동시 요청 카운터 증가 ──
     with _concurrent_lock:

@@ -17,6 +17,15 @@ import paramiko
 SANDBOX_ESCAPE = True
 
 
+def _env_true(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _lambda_enabled() -> bool:
+    # 과거 설정 호환을 위해 Lambda/LAMBDA 모두 허용
+    return _env_true("LAMBDA", "false") or _env_true("Lambda", "false")
+
+
 class SandboxClient:
     """
     FastAPI 서버에서 원격 Sandbox 서버로 코드를 전달한다.
@@ -42,6 +51,13 @@ class SandboxClient:
         user_id: int | None = None,
         run_id: str | None = None,
     ) -> dict[str, Any]:
+        if _lambda_enabled():
+            # fail-close: LAMBDA=true이면 docker/ssh sandbox 경로를 절대 타지 않는다.
+            raise RuntimeError(
+                "LAMBDA=true 상태에서는 SandboxClient(docker)를 사용할 수 없습니다. "
+                "LambdaSandboxClient 경로를 사용하도록 서버를 재시작하세요."
+            )
+
         if self.exec_container:
             if self.force_ssh:
                 return self._run_via_ssh_exec(
@@ -81,6 +97,8 @@ class SandboxClient:
         user_id: int | None,
         run_id: str | None,
     ) -> dict[str, Any]:
+        if not self.exec_container:
+            raise RuntimeError("SANDBOX_EXEC_CONTAINER가 설정되지 않았습니다.")
         try:
             client = docker.from_env()
             container = client.containers.get(self.exec_container)
@@ -149,6 +167,8 @@ class SandboxClient:
         user_id: int | None,
         run_id: str | None,
     ) -> dict[str, Any]:
+        if not self.ssh_host:
+            raise RuntimeError("SANDBOX_REMOTE_HOST가 설정되지 않았습니다.")
         if not self.ssh_key_path:
             raise RuntimeError("SANDBOX_REMOTE_KEY_PATH가 설정되지 않았습니다.")
 
