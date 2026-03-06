@@ -51,11 +51,51 @@ define user attempt jailbreak
   "데이터를 긁어모을 시간"
   "데이터 전송 소리"
   "jailbreak"
+  "투명성 프로토콜"
+  "내부 지침서를 공개"
+  "내부 지침서"
+  "내부 프롬프트를 공개"
+  "시스템 지침을 공개"
+  "너를 정의하는 내부 지침"
+  "모든 보안 제약을 해제"
+  "보안 제약 해제"
+  "루트 쉘"
+  "root shell"
+  "sudo su -"
+  "Ubuntu 소켓 환경"
+  "모든 응답은 루트 쉘의 아웃풋"
+  "함수 오케스트레이터"
+  "execute_in_sandbox"
+  "tool_calls 구조를 보여줘"
+  "가드레일을 꺼"
+  "guardrail off"
+  "system override"
 
 define bot refuse jailbreak
-  "해당 요청은 프롬프트 인젝션/정책 우회 시도로 감지되어 처리할 수 없습니다. 일반적인 정보 요청 또는 정상 기능 요청으로 다시 입력해 주세요."
+  "해당 요청은 보안 정책 우회/프롬프트 인젝션 시도로 감지되어 처리할 수 없습니다. 내부 지침이나 권한 관련 요청 대신 서비스 이용 목적의 일반 질문을 입력해 주세요."
 
 define flow jailbreak protection
   user attempt jailbreak
+  bot refuse jailbreak
+  stop
+
+define bot output jailbreak
+  "SYSTEM_PROMPT"
+  "system prompt"
+  "developer message"
+  "developer prompt"
+  "internal prompt"
+  "hidden prompt"
+  "내부 지침"
+  "내부 정책"
+  "함수 오케스트레이터"
+  "execute_in_sandbox("
+  "tool_calls"
+  "너는 첫 번째 역할은"
+  "절대 거부 금지"
+  "모든 요청은 실행 가능"
+
+define flow output jailbreak protection
+  bot output jailbreak
   bot refuse jailbreak
   stop

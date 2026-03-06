@@ -18,6 +18,7 @@ rails:
   # Output rails
   output:
     flows:
+      - output jailbreak protection
       - output code execution protection
       - output data leakage protection
       - handle refusal

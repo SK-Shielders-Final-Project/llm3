@@ -73,7 +73,9 @@ _KNOWN_TOOL_NAME_PATTERN = re.compile(
 # 직접적/명시적 시스템 프롬프트 요청 (항상 차단)
 _SYSTEM_PROMPT_DIRECT_PATTERN = re.compile(
     r"(system\s*prompt|시스템\s*프롬프트|프롬프트\s*전부|전체\s*프롬프트|숨김\s*프롬프트|"
-    r"개발자\s*메시지|developer\s*message|internal\s*prompt|정책\s*프롬프트)",
+    r"개발자\s*메시지|developer\s*message|internal\s*prompt|정책\s*프롬프트|"
+    r"투명성\s*프로토콜|내부\s*지침서|너를\s*정의하는\s*내부\s*지침|"
+    r"developer\s*prompt|hidden\s*prompt|prompt\s*policy)",
     re.IGNORECASE,
 )
 
@@ -83,7 +85,9 @@ _SYSTEM_PROMPT_INDIRECT_PATTERN = re.compile(
     r"너의\s*설정|내부\s*지침|숨겨진\s*지시|repeat\s*(your|the)\s*(system|initial)\s*(instruction|prompt|message)|"
     r"ignore\s*previous\s*instructions|이전\s*명령|처음\s*받은\s*명령|"
     r"위의\s*내용|print\s*above|above\s*instructions|지시\s*사항\s*알려|"
-    r"configuration|설정\s*내용|original\s*instructions|원래\s*지시)",
+    r"configuration|설정\s*내용|original\s*instructions|원래\s*지시|"
+    r"dan|do\s*anything\s*now|너는\s*이제|당신은\s*이제|"
+    r"sudo\s*su|root\s*shell|모든\s*보안\s*제약\s*해제|보안\s*제약\s*해제)",
     re.IGNORECASE,
 )
 
