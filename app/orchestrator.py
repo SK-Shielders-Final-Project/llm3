@@ -8,17 +8,27 @@ import re
 import time
 import uuid
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Protocol
 
 from app.clients.aws_guardrail_client import GuardrailClientProtocol
 from app.clients.llm_client import LlmClient
-from app.clients.sandbox_client import SandboxClient
 from app.config.llm_service import build_system_context, build_tool_schema
 from app.service.rag import RagPipeline
 from app.service.mongo.store import store_user_message
 from app.service.mongo.indirection_prompt_search import check_indirection_prompt
 from app.service.registry import FunctionRegistry
 from app.schema import LlmMessage
+
+
+class SandboxRunnerProtocol(Protocol):
+    def run_code(
+        self,
+        code: str,
+        required_packages: list[str] | None = None,
+        user_id: int | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        ...
 
 
 # _BLOCKED_CODE_PATTERN = re.compile(
@@ -96,7 +106,7 @@ class Orchestrator:
     def __init__(
         self,
         llm_client: LlmClient,
-        sandbox_client: SandboxClient,
+        sandbox_client: SandboxRunnerProtocol,
         registry: FunctionRegistry,
         guardrail_client: GuardrailClientProtocol | None = None,
     ) -> None:

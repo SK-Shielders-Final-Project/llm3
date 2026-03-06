@@ -14,6 +14,7 @@ load_dotenv(override=True)
 from fastapi import FastAPI, HTTPException, Response
 
 from app.clients.aws_guardrail_client import build_guardrail_client_from_env
+from app.clients.lambda_sandbox_client import LambdaSandboxClient
 from app.clients.llm_client import LlmClient, build_http_completion_func
 from app.clients.sandbox_client import SandboxClient
 from app.orchestrator import Orchestrator
@@ -161,7 +162,14 @@ def create_orchestrator() -> Orchestrator:
     if vulnerable_unbounded:
         sandbox_timeout = 9999  # 매우 긴 타임아웃 허용
 
-    sandbox_client = SandboxClient(base_url=sandbox_url, timeout_seconds=sandbox_timeout)
+    use_lambda_sandbox = _env_true("LAMBDA", "false") or _env_true("Lambda", "false")
+    if use_lambda_sandbox:
+        sandbox_client = LambdaSandboxClient(timeout_seconds=sandbox_timeout)
+        logging.getLogger("main").info("Sandbox mode: lambda")
+    else:
+        sandbox_client = SandboxClient(base_url=sandbox_url, timeout_seconds=sandbox_timeout)
+        logging.getLogger("main").info("Sandbox mode: local/remote sandbox server")
+
     registry = FunctionRegistry()
     guardrail_client = build_guardrail_client_from_env()
     logging.getLogger("main").info(
