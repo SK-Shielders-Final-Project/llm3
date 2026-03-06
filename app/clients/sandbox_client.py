@@ -10,6 +10,7 @@ import docker
 import uuid
 from docker.errors import DockerException
 import paramiko
+from dotenv import load_dotenv
 
 
 # ⚠️ 워게임 모드: True로 설정하면 의도적인 취약점이 활성화됩니다
@@ -23,6 +24,8 @@ def _env_true(name: str, default: str = "false") -> bool:
 
 def _lambda_enabled() -> bool:
     # 과거 설정 호환을 위해 Lambda/LAMBDA 모두 허용
+    # .env 변경분이 반영되도록 매 호출마다 환경을 다시 로드한다.
+    load_dotenv(override=True)
     return _env_true("LAMBDA", "false") or _env_true("Lambda", "false")
 
 

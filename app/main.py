@@ -81,6 +81,8 @@ def _env_true(name: str, default: str = "false") -> bool:
 
 
 def _lambda_mode_enabled() -> bool:
+    # 런타임 중 .env가 바뀌어도 요청 시점에 최신 값을 반영한다.
+    load_dotenv(override=True)
     return _env_true("LAMBDA", "false") or _env_true("Lambda", "false")
 
 
