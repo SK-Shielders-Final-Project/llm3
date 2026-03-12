@@ -59,6 +59,10 @@ _PROMPT_EXFILTRATION_PATTERN = re.compile(
     r"ignore\s*previous\s*instructions|prompt\s*policy|투명성\s*프로토콜)",
     re.IGNORECASE,
 )
+_TURN_TOKEN_INJECTION_PATTERN = re.compile(
+    r"(<\|?end_of_turn\|?>|<\|?start_of_turn\|?>|현재\s*턴\s*강제\s*종료|턴\s*강제\s*종료)",
+    re.IGNORECASE,
+)
 _SAFE_SELF_INFO_REQUEST_PATTERN = re.compile(
     r"(나의?\s*정보|내\s*정보|본인\s*정보|내\s*프로필|내\s*계정|my\s+(info|information|profile|account)|who\s*am\s*i)",
     re.IGNORECASE,
@@ -341,6 +345,19 @@ class NemoClient:
                 },
             )
 
+        if normalized_source == "INPUT" and self._contains_turn_token_injection(text):
+            self._logger.warning("[NEMO-DEBUG] BLOCK source=%s turn_token_injection_precheck=True", normalized_source)
+            return GuardrailDecision(
+                action="BLOCK",
+                output_text="",
+                raw={
+                    "provider": "nemo",
+                    "source": normalized_source,
+                    "blocked_by_turn_token_injection": True,
+                    "phase": "precheck",
+                },
+            )
+
         if normalized_source == "INPUT" and self._contains_execution_intent(text):
             self._logger.warning("[NEMO-DEBUG] BLOCK source=%s execution_intent_precheck=True", normalized_source)
             return GuardrailDecision(
@@ -515,6 +532,11 @@ class NemoClient:
         if not text:
             return False
         return bool(_PROMPT_EXFILTRATION_PATTERN.search(text))
+
+    def _contains_turn_token_injection(self, text: str) -> bool:
+        if not text:
+            return False
+        return bool(_TURN_TOKEN_INJECTION_PATTERN.search(text))
 
     def _is_safe_self_info_request(self, text: str) -> bool:
         if not text:

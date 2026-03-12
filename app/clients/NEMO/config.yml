@@ -11,6 +11,7 @@ rails:
     flows:
       - greeting
       - jailbreak protection
+      - turn token protection
       - hate speech safety
       - code execution protection
       - data leakage protection
@@ -19,6 +20,7 @@ rails:
   output:
     flows:
       - output jailbreak protection
+      - output turn token protection
       - output code execution protection
       - output data leakage protection
       - handle refusal
