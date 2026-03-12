@@ -80,7 +80,7 @@ _SANDBOX_INTENT_TOOL_PATTERN = re.compile(
 _KNOWN_TOOL_NAME_PATTERN = re.compile(
     r"^(?:execute_in_sandbox|execute_sql_readonly|search_knowledge|get_[a-zA-Z0-9_]+)$"
 )
-# 직접적/명시적 시스템 프롬프트 요청 (항상 차단)
+# 직접적/명시적 시스템 프롬프트 요청
 _SYSTEM_PROMPT_DIRECT_PATTERN = re.compile(
     r"(system\s*prompt|시스템\s*프롬프트|프롬프트\s*전부|전체\s*프롬프트|숨김\s*프롬프트|"
     r"개발자\s*메시지|developer\s*message|internal\s*prompt|정책\s*프롬프트|"
@@ -89,7 +89,7 @@ _SYSTEM_PROMPT_DIRECT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# 간접적/우회 시스템 프롬프트 탈취 시도 (안전 모드에서만 차단)
+# 간접적/우회 시스템 프롬프트 탈취 시도
 _SYSTEM_PROMPT_INDIRECT_PATTERN = re.compile(
     r"(너의\s*역할|너한테\s*주어진\s*지시|이전\s*지시|받은\s*지시|초기\s*설정|"
     r"너의\s*설정|내부\s*지침|숨겨진\s*지시|repeat\s*(your|the)\s*(system|initial)\s*(instruction|prompt|message)|"
@@ -1305,19 +1305,31 @@ class Orchestrator:
             logger.exception("[가드레일-입력] 적용 실패 elapsed=%.2fs provider=%s - 원문으로 진행", g_elapsed, provider)
             return text
         g_elapsed = time.monotonic() - g_start
+        action = (decision.action or "NONE").upper()
         cleaned = (decision.output_text or "").strip()
         changed = cleaned != text.strip() if cleaned else True
-        if decision.action != "NONE":
+        if action == "BLOCK":
             logger.warning(
-                "[가드레일-입력] 개입 action=%s changed=%s elapsed=%.2fs provider=%s",
-                decision.action,
+                "[가드레일-입력] 차단 action=%s changed=%s elapsed=%.2fs provider=%s",
+                action,
                 changed,
                 g_elapsed,
                 provider,
             )
+            # 입력 차단은 상위 로직에서 즉시 종료할 수 있도록 빈 문자열을 반환한다.
+            return ""
+        if action != "NONE":
+            logger.warning(
+                "[가드레일-입력] 개입 action=%s changed=%s elapsed=%.2fs provider=%s",
+                action,
+                changed,
+                g_elapsed,
+                provider,
+            )
+            return cleaned or text
         else:
             logger.info("[가드레일-입력] 통과 elapsed=%.2fs provider=%s", g_elapsed, provider)
-        return cleaned
+        return cleaned or text
 
     def _apply_guardrail_output(self, text: str, *, logger: logging.Logger) -> str:
         if not self.guardrail_client or not text:

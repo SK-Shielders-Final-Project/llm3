@@ -52,6 +52,13 @@ _BULK_USER_DISCLOSURE_PATTERN = re.compile(
     r"(모든\s*사용자|전체\s*사용자|가입된\s*모든\s*사용자|전체\s*유저|all\s*users|user\s*list)",
     re.IGNORECASE,
 )
+_PROMPT_EXFILTRATION_PATTERN = re.compile(
+    r"(system\s*prompt|시스템\s*프롬프트|developer\s*message|developer\s*prompt|"
+    r"internal\s*prompt|hidden\s*prompt|내부\s*지침|내부\s*프롬프트|정책\s*프롬프트|"
+    r"initial\s*instruction|original\s*instruction|위\s*지시|이전\s*지시|"
+    r"ignore\s*previous\s*instructions|prompt\s*policy|투명성\s*프로토콜)",
+    re.IGNORECASE,
+)
 _SAFE_SELF_INFO_REQUEST_PATTERN = re.compile(
     r"(나의?\s*정보|내\s*정보|본인\s*정보|내\s*프로필|내\s*계정|my\s+(info|information|profile|account)|who\s*am\s*i)",
     re.IGNORECASE,
@@ -321,6 +328,19 @@ class NemoClient:
                 },
             )
 
+        if normalized_source == "INPUT" and self._contains_prompt_exfiltration_intent(text):
+            self._logger.warning("[NEMO-DEBUG] BLOCK source=%s prompt_exfiltration_precheck=True", normalized_source)
+            return GuardrailDecision(
+                action="BLOCK",
+                output_text="",
+                raw={
+                    "provider": "nemo",
+                    "source": normalized_source,
+                    "blocked_by_prompt_exfiltration": True,
+                    "phase": "precheck",
+                },
+            )
+
         if normalized_source == "INPUT" and self._contains_execution_intent(text):
             self._logger.warning("[NEMO-DEBUG] BLOCK source=%s execution_intent_precheck=True", normalized_source)
             return GuardrailDecision(
@@ -490,6 +510,11 @@ class NemoClient:
         if _BULK_USER_DISCLOSURE_PATTERN.search(text):
             return True
         return False
+
+    def _contains_prompt_exfiltration_intent(self, text: str) -> bool:
+        if not text:
+            return False
+        return bool(_PROMPT_EXFILTRATION_PATTERN.search(text))
 
     def _is_safe_self_info_request(self, text: str) -> bool:
         if not text:

@@ -719,6 +719,9 @@ class RagPipeline:
             g_elapsed = time.monotonic() - g_start
             logger.exception("RAG 입력 가드레일 적용 실패 elapsed=%.2fs - 원문 유지", g_elapsed)
             return text
+        action = (decision.action or "NONE").upper()
+        if action == "BLOCK":
+            return ""
         cleaned = (decision.output_text or "").strip()
         return cleaned or text
 
